@@ -1,0 +1,52 @@
+[package]
+name = "sala_hud"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/sala_hud.rs"
+doctest = false
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+collections.workspace = true
+futures.workspace = true
+gpui.workspace = true
+hyper.workspace = true
+language.workspace = true
+log.workspace = true
+lsp.workspace = true
+project.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+settings.workspace = true
+task.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
+theme.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tonic.workspace = true
+tower.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+project = { workspace = true, features = ["test-support"] }
+serde_json.workspace = true
+settings = { workspace = true, features = ["test-support"] }
+workspace = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+tonic-build.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = ["log"]

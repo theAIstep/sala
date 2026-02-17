@@ -1,0 +1,251 @@
+syntax = "proto3";
+
+package devcontainer;
+
+// tala DevContainer service for managing development containers
+service DevContainerService {
+    // Health check for daemon liveness
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+
+    // Pre-flight check: validate Docker connectivity and permissions
+    rpc PreflightCheck(PreflightRequest) returns (PreflightResponse);
+
+    // Greenfield: Generate project scaffold from intent (Flow 0)
+    rpc GenerateScaffold(GenerateScaffoldRequest) returns (stream ScaffoldEvent);
+
+    // Greenfield: Apply scaffold writes
+    rpc ApplyScaffold(ApplyScaffoldRequest) returns (ApplyScaffoldResponse);
+
+    // Build or rebuild a DevContainer
+    rpc BuildContainer(BuildRequest) returns (stream BuildProgress);
+
+    // Connect to existing container (fast path)
+    rpc ConnectContainer(ConnectRequest) returns (ConnectResponse);
+
+    // Stop a running container
+    rpc StopContainer(StopRequest) returns (StopResponse);
+
+    // Forward LSP request to container
+    rpc ForwardLSP(LSPRequest) returns (LSPResponse);
+
+    // Open terminal in container
+    rpc OpenTerminal(TerminalRequest) returns (stream TerminalOutput);
+
+    // Send input to terminal
+    rpc SendTerminalInput(TerminalInput) returns (TerminalInputAck);
+
+    // Get container status
+    rpc GetStatus(StatusRequest) returns (StatusResponse);
+
+    // List unused volumes for cleanup
+    rpc ListUnusedVolumes(ListVolumesRequest) returns (ListVolumesResponse);
+
+    // Delete volumes
+    rpc DeleteVolumes(DeleteVolumesRequest) returns (DeleteVolumesResponse);
+}
+
+// ===== Health Check =====
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+    string version = 1;
+    bool healthy = 2;
+}
+
+// ===== Preflight Check =====
+message PreflightRequest {
+    string workspace_path = 1;
+}
+
+message PreflightResponse {
+    bool docker_available = 1;
+    bool docker_permissions_ok = 2;
+    string error_message = 3;
+    string help_url = 4;
+}
+
+// ===== Scaffold Generation =====
+message GenerateScaffoldRequest {
+    string intent = 1;
+    string workspace_path = 2;
+}
+
+message ScaffoldEvent {
+    oneof event {
+        FileNode file_node = 1;
+        ConfigGenerated config = 2;
+        Progress progress = 3;
+        Complete complete = 4;
+        Error error = 5;
+    }
+}
+
+message FileNode {
+    string path = 1;
+    string content = 2;
+    Confidence confidence = 3;
+    string reasoning = 4;
+}
+
+message ConfigGenerated {
+    string devcontainer_json = 1;
+}
+
+message Progress {
+    uint32 step = 1;
+    uint32 total = 2;
+}
+
+message Complete {}
+
+message Error {
+    string message = 1;
+}
+
+enum Confidence {
+    HIGH = 0;
+    MEDIUM = 1;
+    LOW = 2;
+}
+
+// ===== Apply Scaffold =====
+message ApplyScaffoldRequest {
+    string workspace_path = 1;
+    repeated ScaffoldFileAction actions = 2;
+}
+
+message ScaffoldFileAction {
+    string path = 1;
+    Action action = 2;
+    string content = 3;
+
+    enum Action {
+        ACTION_UNSPECIFIED = 0;
+        CREATE = 1;
+        OVERWRITE = 2;
+        SKIP = 3;
+    }
+}
+
+message ApplyScaffoldResponse {
+    bool success = 1;
+    repeated string created_paths = 2;
+    repeated string overwritten_paths = 3;
+    repeated string skipped_paths = 4;
+    int32 files_written = 5;
+    int32 files_skipped = 6;
+    string failed_file_path = 7;
+    string error_message = 8;
+    string devcontainer_config_path = 9;
+}
+
+// ===== Build Container =====
+message BuildRequest {
+    string workspace_path = 1;
+    string config_path = 2;
+    bool force_rebuild = 3;
+}
+
+message BuildProgress {
+    Stage stage = 1;
+    int32 percent = 2;
+    string message = 3;
+    string log_line = 4;
+    string error = 5;
+
+    enum Stage {
+        PARSING_CONFIG = 0;
+        BUILDING_IMAGE = 1;
+        CREATING_VOLUME = 2;
+        STARTING_CONTAINER = 3;
+        INJECTING_SERVER = 4;
+        COMPLETE = 5;
+        FAILED = 6;
+    }
+}
+
+// ===== Connect Container =====
+message ConnectRequest {
+    string workspace_path = 1;
+}
+
+message ConnectResponse {
+    string container_id = 1;
+    string workspace_folder = 2;
+    bool config_changed = 3;
+}
+
+// ===== Stop Container =====
+message StopRequest {
+    string workspace_path = 1;
+}
+
+message StopResponse {
+    bool success = 1;
+}
+
+// ===== LSP Forwarding =====
+message LSPRequest {
+    string server = 1;
+    string request = 2;
+}
+
+message LSPResponse {
+    string response = 1;
+}
+
+// ===== Terminal =====
+message TerminalRequest {
+    string workspace_path = 1;
+    string command = 2;
+}
+
+message TerminalOutput {
+    bytes data = 1;
+    int32 exit_code = 2;
+}
+
+message TerminalInput {
+    string terminal_id = 1;
+    bytes data = 2;
+}
+
+message TerminalInputAck {
+    bool success = 1;
+}
+
+// ===== Status =====
+message StatusRequest {
+    string workspace_path = 1;
+}
+
+message StatusResponse {
+    string container_id = 1;
+    string status = 2;
+    bool running = 3;
+}
+
+// ===== Volume Management =====
+message ListVolumesRequest {
+    uint32 older_than_days = 1;
+}
+
+message ListVolumesResponse {
+    repeated VolumeInfo volumes = 1;
+}
+
+message VolumeInfo {
+    string volume_name = 1;
+    string workspace_path = 2;
+    int64 size_bytes = 3;
+    int64 last_accessed_at = 4;
+}
+
+message DeleteVolumesRequest {
+    repeated string volume_names = 1;
+}
+
+message DeleteVolumesResponse {
+    repeated string deleted_volumes = 1;
+    repeated string failed_volumes = 2;
+}
