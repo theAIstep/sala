@@ -1,3 +1,10 @@
+pub mod devcontainer_hud;
+
+pub use devcontainer_hud::{
+    DevContainerCapabilities, DevContainerHud, DevContainerHudEvent, DevContainerPhase,
+    DevContainerStatus,
+};
+
 use anyhow::Result;
 use async_trait::async_trait;
 use collections::HashMap;
@@ -57,6 +64,7 @@ pub struct SalaHud {
     auto_reopen: bool,
     container_lsp_registered: bool,
     container_lsp_available: Option<bool>,
+    hud: DevContainerHud,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -205,6 +213,16 @@ impl TalaDaemonClient {
 
         log::info!("Attempting to connect to tala daemon at {}", ipc_path);
 
+        // tonic/hyper use tokio internally for the transport layer.
+        // When running under a non-tokio executor (e.g. GPUI tests on
+        // smol), bail gracefully instead of panicking in UnixStream.
+        if tokio::runtime::Handle::try_current().is_err() {
+            anyhow::bail!(
+                "no tokio runtime available (connection to {} requires tokio)",
+                ipc_path,
+            );
+        }
+
         let channel = ipc::create_channel(ipc_path).await?;
         let client =
             devcontainer::dev_container_service_client::DevContainerServiceClient::new(channel);
@@ -276,6 +294,44 @@ impl TalaDaemonClient {
                 );
                 false
             }
+        }
+    }
+}
+
+/// Check whether the container terminal is functional by running `echo SMOKE_OK`.
+async fn check_terminal_smoke(container_id: &str) -> bool {
+    log::info!(
+        "checking terminal availability in container {}",
+        container_id
+    );
+    let output = tokio::process::Command::new("docker")
+        .args(["exec", container_id, "echo", "SMOKE_OK"])
+        .output()
+        .await;
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let ok = output.status.success() && stdout.contains("SMOKE_OK");
+            if ok {
+                log::info!(
+                    "terminal smoke check passed for container {}",
+                    container_id
+                );
+            } else {
+                log::warn!(
+                    "terminal smoke check failed for container {}",
+                    container_id
+                );
+            }
+            ok
+        }
+        Err(error) => {
+            log::error!(
+                "terminal smoke check error for container {}: {}",
+                container_id,
+                error
+            );
+            false
         }
     }
 }
@@ -607,6 +663,7 @@ impl SalaHud {
                 auto_reopen: false,
                 container_lsp_registered: false,
                 container_lsp_available: None,
+                hud: DevContainerHud::new(),
                 _subscriptions: Vec::new(),
             }
         });
@@ -628,7 +685,22 @@ impl SalaHud {
                 let detected_config = config_detection_task.await;
 
                 match connection_task.await {
-                    Ok(mut client) => match client.health_check().await {
+                    Ok(mut client) => {
+                        // HUD: mark preflight phase
+                        weak_entity
+                            .update(cx, |this, _cx| {
+                                if let Some(ws_path) = &this.workspace_path {
+                                    let project = ws_path
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy().to_string())
+                                        .unwrap_or_else(|| "workspace".to_string());
+                                    this.hud
+                                        .on_preflight_started(ws_path.clone(), project);
+                                }
+                            })
+                            .log_err();
+
+                        match client.health_check().await {
                         Ok((version, healthy)) if healthy => {
                             let preflight_result =
                                 if detected_config.is_some() {
@@ -675,36 +747,50 @@ impl SalaHud {
                                         this.devcontainer_state =
                                             DevContainerState::Detected { config_path };
                                     }
+                                    if let Some(ws) = &this.workspace_path {
+                                        this.hud.on_error(
+                                            ws,
+                                            "Daemon unhealthy".to_string(),
+                                        );
+                                    }
                                     cx.notify();
                                 })
                                 .log_err();
                         }
                         Err(error) => {
                             log::error!("Failed health check with tala daemon: {}", error);
+                            let error_msg =
+                                format!("Health check failed: {}", error);
                             weak_entity
                                 .update(cx, |this, cx| {
-                                    this.connection_status = ConnectionStatus::Disconnected(
-                                        format!("Health check failed: {}", error),
-                                    );
+                                    this.connection_status =
+                                        ConnectionStatus::Disconnected(error_msg.clone());
                                     if let Some(config_path) = detected_config {
                                         this.devcontainer_state =
                                             DevContainerState::Detected { config_path };
+                                    }
+                                    if let Some(ws) = &this.workspace_path {
+                                        this.hud.on_error(ws, error_msg);
                                     }
                                     cx.notify();
                                 })
                                 .log_err();
                         }
+                    }
                     },
                     Err(error) => {
                         log::error!("Failed to connect to tala daemon: {}", error);
+                        let error_msg = format!("Connection failed: {}", error);
                         weak_entity
                             .update(cx, |this, cx| {
-                                this.connection_status = ConnectionStatus::Disconnected(
-                                    format!("Connection failed: {}", error),
-                                );
+                                this.connection_status =
+                                    ConnectionStatus::Disconnected(error_msg.clone());
                                 if let Some(config_path) = detected_config {
                                     this.devcontainer_state =
                                         DevContainerState::Detected { config_path };
+                                }
+                                if let Some(ws) = &this.workspace_path {
+                                    this.hud.on_error(ws, error_msg);
                                 }
                                 cx.notify();
                             })
@@ -746,6 +832,7 @@ impl SalaHud {
             .map(|name| name.to_string_lossy().to_string())
             .unwrap_or_else(|| "workspace".to_string());
         let workspace_path_string = workspace_path.to_string_lossy().to_string();
+        let workspace_path_buf = workspace_path.clone();
         let config_path_string = config_path.to_string_lossy().to_string();
         let workspace_handle = self.workspace.clone();
 
@@ -753,6 +840,8 @@ impl SalaHud {
             percent: 0,
             message: "Starting build...".to_string(),
         };
+        self.hud
+            .on_build_progress(&workspace_path_buf, 0, "Starting build...".to_string());
         cx.notify();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -775,6 +864,11 @@ impl SalaHud {
                                     devcontainer::build_progress::Stage::Failed
                                 );
 
+                                // Extract values for HUD before they are moved
+                                let bp_percent = build_progress.percent;
+                                let bp_message = build_progress.message.clone();
+                                let bp_error = build_progress.error.clone();
+
                                 // The build_progress.message on Complete contains
                                 // "Container ready: <container_id>" — extract the id.
                                 let resolved_container_id = if is_complete {
@@ -788,6 +882,9 @@ impl SalaHud {
                                 } else {
                                     None
                                 };
+
+                                let hud_container_id = resolved_container_id.clone();
+                                let hud_workspace = workspace_path_buf.clone();
 
                                 let new_state = if let Some(ref container_id) = resolved_container_id {
                                     DevContainerState::Connected {
@@ -808,8 +905,30 @@ impl SalaHud {
                                     }
                                 };
 
-                                this.update(cx, |hud, cx| {
-                                    hud.devcontainer_state = new_state;
+                                this.update(cx, |panel, cx| {
+                                    panel.devcontainer_state = new_state;
+
+                                    // HUD state tracking
+                                    if let Some(container_id) = hud_container_id {
+                                        panel.hud.on_container_started(
+                                            &hud_workspace,
+                                            container_id,
+                                        );
+                                    } else if is_failed {
+                                        let err = if bp_error.is_empty() {
+                                            bp_message.clone()
+                                        } else {
+                                            bp_error
+                                        };
+                                        panel.hud.on_error(&hud_workspace, err);
+                                    } else {
+                                        panel.hud.on_build_progress(
+                                            &hud_workspace,
+                                            bp_percent as u8,
+                                            bp_message.clone(),
+                                        );
+                                    }
+
                                     cx.notify();
                                 })?;
 
@@ -828,8 +947,8 @@ impl SalaHud {
 
                                     // Register container LSP adapter
                                     let project_name = project_name.clone();
-                                    this.update(cx, |hud, cx| {
-                                        hud.register_container_lsp(
+                                    this.update(cx, |panel, cx| {
+                                        panel.register_container_lsp(
                                             &container_id,
                                             &project_name,
                                             cx,
@@ -838,28 +957,82 @@ impl SalaHud {
                                     .log_err();
 
                                     // Check rust-analyzer availability in background
-                                    let container_id_for_check = container_id.clone();
-                                    let lsp_check = cx
-                                        .background_executor()
-                                        .spawn(async move {
-                                            TalaDaemonClient::check_lsp_capability(
-                                                &container_id_for_check,
-                                                "rust-analyzer",
-                                            )
-                                            .await
-                                        });
-                                    let available = lsp_check.await;
-                                    this.update(cx, |hud, cx| {
-                                        hud.container_lsp_available = Some(available);
-                                        if !available {
-                                            log::warn!(
-                                                "rust-analyzer not found in container; \
-                                                 LSP features may be unavailable"
+                                    {
+                                        let container_id_for_check = container_id.clone();
+                                        let lsp_check = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                TalaDaemonClient::check_lsp_capability(
+                                                    &container_id_for_check,
+                                                    "rust-analyzer",
+                                                )
+                                                .await
+                                            });
+                                        let available = lsp_check.await;
+                                        let hud_ws = workspace_path_buf.clone();
+                                        this.update(cx, |panel, cx| {
+                                            panel.container_lsp_available =
+                                                Some(available);
+                                            panel
+                                                .hud
+                                                .on_lsp_rust_result(&hud_ws, available);
+                                            if !available {
+                                                log::warn!(
+                                                    "rust-analyzer not found in container; \
+                                                     LSP features may be unavailable"
+                                                );
+                                            }
+                                            cx.notify();
+                                        })
+                                        .log_err();
+                                    }
+
+                                    // Check pyright availability in background
+                                    {
+                                        let container_id_for_check = container_id.clone();
+                                        let python_check = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                TalaDaemonClient::check_lsp_capability(
+                                                    &container_id_for_check,
+                                                    "pyright-langserver",
+                                                )
+                                                .await
+                                            });
+                                        let python_available = python_check.await;
+                                        let hud_ws = workspace_path_buf.clone();
+                                        this.update(cx, |panel, cx| {
+                                            panel.hud.on_lsp_python_result(
+                                                &hud_ws,
+                                                python_available,
                                             );
-                                        }
-                                        cx.notify();
-                                    })
-                                    .log_err();
+                                            cx.notify();
+                                        })
+                                        .log_err();
+                                    }
+
+                                    // Terminal smoke check in background
+                                    {
+                                        let container_id_for_check = container_id.clone();
+                                        let terminal_check = cx
+                                            .background_executor()
+                                            .spawn(async move {
+                                                check_terminal_smoke(
+                                                    &container_id_for_check,
+                                                )
+                                                .await
+                                            });
+                                        let terminal_ok = terminal_check.await;
+                                        let hud_ws = workspace_path_buf.clone();
+                                        this.update(cx, |panel, cx| {
+                                            panel.hud.on_terminal_smoke_result(
+                                                &hud_ws,
+                                                terminal_ok,
+                                            );
+                                            cx.notify();
+                                        })
+                                        .log_err();
+                                    }
                                 }
 
                                 if is_complete || is_failed {
@@ -867,11 +1040,14 @@ impl SalaHud {
                                 }
                             }
                             Err(status) => {
-                                this.update(cx, |hud, cx| {
-                                    hud.remove_container_lsp(cx);
-                                    hud.devcontainer_state = DevContainerState::Failed {
-                                        error: status.message().to_string(),
+                                let error_msg = status.message().to_string();
+                                let hud_ws = workspace_path_buf.clone();
+                                this.update(cx, |panel, cx| {
+                                    panel.remove_container_lsp(cx);
+                                    panel.devcontainer_state = DevContainerState::Failed {
+                                        error: error_msg.clone(),
                                     };
+                                    panel.hud.on_error(&hud_ws, error_msg);
                                     cx.notify();
                                 })?;
                                 break;
@@ -880,11 +1056,14 @@ impl SalaHud {
                     }
                 }
                 Err(error) => {
-                    this.update(cx, |hud, cx| {
-                        hud.remove_container_lsp(cx);
-                        hud.devcontainer_state = DevContainerState::Failed {
-                            error: format!("{}", error),
+                    let error_msg = format!("{}", error);
+                    let hud_ws = workspace_path_buf.clone();
+                    this.update(cx, |panel, cx| {
+                        panel.remove_container_lsp(cx);
+                        panel.devcontainer_state = DevContainerState::Failed {
+                            error: error_msg.clone(),
                         };
+                        panel.hud.on_error(&hud_ws, error_msg);
                         cx.notify();
                     })
                     .log_err();
@@ -1044,12 +1223,18 @@ impl SalaHud {
 
     fn dismiss_devcontainer(&mut self, cx: &mut Context<Self>) {
         self.remove_container_lsp(cx);
+        if let Some(ws) = &self.workspace_path {
+            self.hud.remove_workspace(ws);
+        }
         self.devcontainer_state = DevContainerState::NotDetected;
         cx.notify();
     }
 
     fn retry_build(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.remove_container_lsp(cx);
+        if let Some(ws) = &self.workspace_path {
+            self.hud.remove_workspace(ws);
+        }
         if let Some(workspace_path) = &self.workspace_path {
             let workspace_path = workspace_path.clone();
             if let Some(config_path) = detect_devcontainer_config(&workspace_path) {
@@ -1058,6 +1243,13 @@ impl SalaHud {
                 self.start_build(window, cx);
             }
         }
+    }
+
+    /// Dump HUD status for all tracked workspaces to the log.
+    #[allow(dead_code)]
+    fn dump_hud_status(&self) {
+        let table = self.hud.format_status_table();
+        log::info!("[HUD STATUS]\n{}", table);
     }
 
     fn render_devcontainer_section(
