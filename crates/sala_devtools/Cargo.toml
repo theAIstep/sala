@@ -8,13 +8,29 @@ license = "GPL-3.0-or-later"
 [lints]
 workspace = true
 
+[lib]
+path = "src/sala_devtools.rs"
+doctest = false
+
 [[bin]]
-name = "devcontainer_smoke_test"
+name = "dc-smoke"
 path = "src/main.rs"
 
 [[bin]]
-name = "devcontainer_status"
+name = "dc-status"
 path = "src/devcontainer_status.rs"
+
+[[bin]]
+name = "dc-doctor"
+path = "src/devcontainer_doctor.rs"
+
+[[bin]]
+name = "dc-build"
+path = "src/dc_build.rs"
+
+[[bin]]
+name = "dc-connect"
+path = "src/dc_connect.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -22,6 +38,7 @@ futures.workspace = true
 hyper.workspace = true
 prost.workspace = true
 sala_hud = { path = "../sala_hud", default-features = false }
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 tokio = { workspace = true, features = ["full"] }
 tonic.workspace = true

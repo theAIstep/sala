@@ -14548,6 +14548,7 @@ dependencies = [
  "hyper 0.14.32",
  "prost",
  "sala_hud",
+ "serde",
  "serde_json",
  "tokio",
  "tonic",

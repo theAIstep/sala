@@ -1,25 +1,30 @@
-# Sala DevTools — local development targets
+# Sala DevTools — dc-* CLI targets
 #
 # Usage:
-#   make smoke                          # Rust LSP against playground-rust
-#   make smoke-python                   # Python LSP against playground-python
-#   make smoke WORKSPACE=/my/proj       # custom workspace
-#   make smoke TIMEOUT=120              # override build timeout
-#   make smoke LANGUAGE=python          # override language
-#   make status                          # show all running DevContainers
-#   make status-json                     # JSON output
-#   make status WORKSPACE=/my/proj       # filter to workspace
+#   make dc-smoke                             # Rust LSP against playground-rust
+#   make dc-smoke-python                      # Python LSP against playground-python
+#   make dc-smoke DC_WORKSPACE=/my/proj       # custom workspace
+#   make dc-smoke TIMEOUT=120                 # override build timeout
+#   make dc-status                            # show all running DevContainers
+#   make dc-status-json                       # JSON output
+#   make dc-doctor                            # full diagnostic with next-action hints
+#   make dc-doctor-json                       # JSON diagnostic output
+#   make dc-build                             # build DevContainer for workspace
+#   make dc-connect                           # fast-path connect to existing container
+#
+# Override workspace for any target:
+#   DC_WORKSPACE=/some/path make dc-doctor
 
-WORKSPACE  ?= /workspace/_JAGORA/playground-rust
-TIMEOUT    ?= 600
-LANGUAGE   ?= rust
-TALA_SOCK  ?= /tmp/tala.sock
+DC_WORKSPACE ?= /workspace/_JAGORA/playground-rust
+TIMEOUT      ?= 600
+LANGUAGE     ?= rust
+TALA_SOCK    ?= /tmp/tala.sock
 
-.PHONY: smoke smoke-python smoke-build check-tala status status-build status-json
+.PHONY: dc-smoke dc-smoke-python dc-status dc-status-json \
+        dc-doctor dc-doctor-json dc-build dc-connect \
+        check-tala build-all
 
-smoke-build:
-	@echo "--- Building smoke test binary ---"
-	cargo build -p sala_devtools --bin devcontainer_smoke_test
+# --- Prerequisites ---
 
 check-tala:
 	@if [ ! -S "$(TALA_SOCK)" ]; then \
@@ -32,35 +37,63 @@ check-tala:
 		exit 1; \
 	fi
 
-smoke: smoke-build check-tala
+build-all:
+	@echo "--- Building all sala_devtools binaries ---"
+	cargo build -p sala_devtools
+
+# --- dc-smoke ---
+
+dc-smoke: check-tala
 	@echo ""
-	@echo "--- Running DevContainer Smoke Test ($(LANGUAGE)) ---"
-	@echo "    workspace: $(WORKSPACE)"
+	@echo "--- dc-smoke ($(LANGUAGE)) ---"
+	@echo "    workspace: $(DC_WORKSPACE)"
 	@echo "    language:  $(LANGUAGE)"
 	@echo "    timeout:   $(TIMEOUT)s"
 	@echo ""
-	cargo run -p sala_devtools --bin devcontainer_smoke_test -- \
+	cargo run -p sala_devtools --bin dc-smoke -- \
+		--workspace $(DC_WORKSPACE) \
 		--language $(LANGUAGE) \
-		--max-wait-seconds $(TIMEOUT) \
-		$(WORKSPACE)
+		--max-wait-seconds $(TIMEOUT)
 
-smoke-python: smoke-build check-tala
+dc-smoke-python: check-tala
 	@echo ""
-	@echo "--- Running DevContainer Smoke Test (python) ---"
+	@echo "--- dc-smoke (python) ---"
 	@echo "    workspace: /workspace/_JAGORA/playground-python"
 	@echo "    timeout:   $(TIMEOUT)s"
 	@echo ""
-	cargo run -p sala_devtools --bin devcontainer_smoke_test -- \
+	cargo run -p sala_devtools --bin dc-smoke -- \
+		--workspace /workspace/_JAGORA/playground-python \
 		--language python \
-		--max-wait-seconds $(TIMEOUT) \
-		/workspace/_JAGORA/playground-python
+		--max-wait-seconds $(TIMEOUT)
 
-status-build:
-	@echo "--- Building status binary ---"
-	cargo build -p sala_devtools --bin devcontainer_status
+# --- dc-status ---
 
-status: status-build
-	cargo run -p sala_devtools --bin devcontainer_status -- $(STATUS_ARGS)
+dc-status:
+	cargo run -p sala_devtools --bin dc-status -- \
+		$(if $(filter-out /workspace/_JAGORA/playground-rust,$(DC_WORKSPACE)),--workspace $(DC_WORKSPACE),)
 
-status-json: status-build
-	cargo run -p sala_devtools --bin devcontainer_status -- --json $(STATUS_ARGS)
+dc-status-json:
+	cargo run -p sala_devtools --bin dc-status -- --json \
+		$(if $(filter-out /workspace/_JAGORA/playground-rust,$(DC_WORKSPACE)),--workspace $(DC_WORKSPACE),)
+
+# --- dc-doctor ---
+
+dc-doctor:
+	cargo run -p sala_devtools --bin dc-doctor -- \
+		--workspace $(DC_WORKSPACE)
+
+dc-doctor-json:
+	cargo run -p sala_devtools --bin dc-doctor -- --json \
+		--workspace $(DC_WORKSPACE)
+
+# --- dc-build ---
+
+dc-build: check-tala
+	cargo run -p sala_devtools --bin dc-build -- \
+		--workspace $(DC_WORKSPACE)
+
+# --- dc-connect ---
+
+dc-connect: check-tala
+	cargo run -p sala_devtools --bin dc-connect -- \
+		--workspace $(DC_WORKSPACE)

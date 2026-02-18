@@ -1,38 +1,18 @@
-// Headless DevContainer smoke test for Sala.
+// dc-smoke — Headless DevContainer smoke test.
 //
-// Exercises Flow 1 (StartDevContainer), Phase 2B (Terminal), and Phase 2C
+// Exercises Flow 1 (BuildContainer), Phase 2B (Terminal), and Phase 2C
 // (Local Exec LSP) without requiring a GPUI window. Designed to run inside
 // a DevContainer terminal or any environment where `tala` is listening on
-// `/tmp/tala.sock` (Unix) or `\\.\pipe\tala` (Windows).
+// its IPC socket.
 //
 // # Usage
 //
 // ```sh
-// # Rust project (default):
-// cargo run -p sala_devtools --bin devcontainer_smoke_test -- /workspace/_JAGORA/playground-rust
-//
-// # Python project:
-// cargo run -p sala_devtools --bin devcontainer_smoke_test -- --language python /workspace/_JAGORA/playground-python
-//
-// # Override the default build timeout (600s):
-// cargo run -p sala_devtools --bin devcontainer_smoke_test -- --max-wait-seconds 120 /workspace/_JAGORA/playground-rust
-//
-// # Or use the Makefile shortcut:
-// make -C crates/sala_devtools smoke
-// make -C crates/sala_devtools smoke-python
+// dc-smoke --workspace /workspace/_JAGORA/playground-rust
+// dc-smoke --workspace /workspace/_JAGORA/playground-python --language python
+// dc-smoke --workspace /workspace/_JAGORA/playground-rust --json
+// dc-smoke --max-wait-seconds 120
 // ```
-//
-// # Preconditions
-//
-// - **tala daemon** must be running and listening on `/tmp/tala.sock`.
-//   Start it with: `cargo run -p tala-server --bin tala` (from the tala repo).
-// - **Docker** must be installed and the current user must have permissions
-//   to run `docker` commands without sudo.
-// - The target workspace must contain `.devcontainer/devcontainer.json` or
-//   `.devcontainer.json`.
-// - For `--language rust`: rust-analyzer must be installed in the container.
-// - For `--language python`: pyright-langserver must be installed in the
-//   container (typically via `npm install -g pyright`).
 //
 // # Exit codes
 //
@@ -46,13 +26,11 @@
 // | 5    | Terminal stage failed              |
 // | 6    | LSP stage failed                   |
 
-mod devcontainer {
-    tonic::include_proto!("devcontainer");
-}
-
 use anyhow::{Context as _, Result, bail};
-use devcontainer::dev_container_service_client::DevContainerServiceClient;
 use futures::StreamExt;
+use sala_devtools::cli;
+use sala_devtools::ipc::{self, devcontainer, DevContainerServiceClient};
+use sala_devtools::schemas::{DcSmokeJson, DcSmokeStepJson};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -64,15 +42,10 @@ const DEFAULT_MAX_WAIT_SECONDS: u64 = 600;
 
 #[derive(Clone)]
 struct LspConfig {
-    /// Display name shown in logs and summary, e.g. "rust-analyzer", "pyright"
     display_name: &'static str,
-    /// Binary to check for in the container
     check_binary: &'static str,
-    /// Binary to run as LSP server
     server_binary: &'static str,
-    /// Extra arguments after the binary (e.g. ["--stdio"] for pyright)
     server_args: Vec<&'static str>,
-    /// Log tag prefix, e.g. "[LSP-RUST]  ", "[LSP-PYTHON]"
     log_tag: &'static str,
 }
 
@@ -99,55 +72,41 @@ impl LspConfig {
 }
 
 // ---------------------------------------------------------------------------
-// CLI argument parsing (no external deps)
+// CLI argument parsing
 // ---------------------------------------------------------------------------
 
 struct Args {
     workspace_path: PathBuf,
     max_wait_seconds: u64,
+    json: bool,
     lsp_config: LspConfig,
-}
-
-fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
-    // --flag value
-    if let Some(pos) = args.iter().position(|a| a == flag) {
-        if pos + 1 < args.len() {
-            let val = args[pos + 1].clone();
-            args.drain(pos..=pos + 1);
-            return Some(val);
-        }
-    }
-    // --flag=value
-    let prefix = format!("{flag}=");
-    if let Some(pos) = args.iter().position(|a| a.starts_with(&prefix)) {
-        let val = args[pos][prefix.len()..].to_string();
-        args.remove(pos);
-        return Some(val);
-    }
-    None
 }
 
 fn parse_args() -> Result<Args> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
-        println!("Usage: devcontainer_smoke_test [OPTIONS] [WORKSPACE_PATH]");
+        println!("Usage: dc-smoke [OPTIONS] [WORKSPACE_PATH]");
+        println!();
+        println!("End-to-end smoke test for a DevContainer workspace.");
         println!();
         println!("Options:");
+        println!("  -w, --workspace <PATH>     Workspace to test (default: cwd)");
+        println!("  -j, --json                 Machine-readable JSON output");
         println!("  --max-wait-seconds <N>     Build timeout in seconds (default: {DEFAULT_MAX_WAIT_SECONDS})");
-        println!("  --language <rust|python>    Language LSP to test (default: rust)");
+        println!("  --language <rust|python>   Language LSP to test (default: rust)");
         println!("  -h, --help                 Show this help");
-        println!();
-        println!("WORKSPACE_PATH defaults to the current directory.");
         std::process::exit(0);
     }
 
-    let max_wait_seconds: u64 = extract_flag(&mut args, "--max-wait-seconds")
+    let common = cli::parse_common_args(&mut args);
+
+    let max_wait_seconds: u64 = cli::extract_flag(&mut args, "--max-wait-seconds")
         .map(|v| v.parse().context("--max-wait-seconds must be a positive integer"))
         .transpose()?
         .unwrap_or(DEFAULT_MAX_WAIT_SECONDS);
 
-    let language = extract_flag(&mut args, "--language")
+    let language = cli::extract_flag(&mut args, "--language")
         .unwrap_or_else(|| "rust".to_string());
 
     let lsp_config = match language.as_str() {
@@ -156,149 +115,18 @@ fn parse_args() -> Result<Args> {
         other => bail!("unsupported --language value: {other} (expected: rust, python)"),
     };
 
+    // Accept positional arg as workspace override (convenience)
     let workspace_path = match args.into_iter().find(|a| !a.starts_with('-')) {
         Some(p) => PathBuf::from(p),
-        None => std::env::current_dir().context("cannot determine current directory")?,
+        None => common.workspace,
     };
 
     Ok(Args {
         workspace_path,
         max_wait_seconds,
+        json: common.json,
         lsp_config,
     })
-}
-
-// ---------------------------------------------------------------------------
-// IPC transport (mirrors sala_hud's platform-specific channel creation)
-// ---------------------------------------------------------------------------
-
-#[cfg(unix)]
-mod ipc {
-    use anyhow::Result;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use tokio::net::UnixStream;
-
-    pub struct IpcStream(UnixStream);
-
-    impl AsyncRead for IpcStream {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_read(cx, buf)
-        }
-    }
-
-    impl AsyncWrite for IpcStream {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Pin::new(&mut self.0).poll_write(cx, buf)
-        }
-
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_flush(cx)
-        }
-
-        fn poll_shutdown(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_shutdown(cx)
-        }
-    }
-
-    impl hyper::client::connect::Connection for IpcStream {
-        fn connected(&self) -> hyper::client::connect::Connected {
-            hyper::client::connect::Connected::new()
-        }
-    }
-
-    pub async fn create_channel(path: String) -> Result<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(tower::service_fn(move |_: hyper::Uri| {
-                let path = path.clone();
-                async move {
-                    let stream = UnixStream::connect(path).await?;
-                    Ok::<_, std::io::Error>(IpcStream(stream))
-                }
-            }))
-            .await?;
-        Ok(channel)
-    }
-}
-
-#[cfg(windows)]
-mod ipc {
-    use anyhow::Result;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-    use tokio::net::windows::named_pipe::NamedPipeClient;
-
-    pub struct IpcStream(NamedPipeClient);
-
-    impl AsyncRead for IpcStream {
-        fn poll_read(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_read(cx, buf)
-        }
-    }
-
-    impl AsyncWrite for IpcStream {
-        fn poll_write(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            Pin::new(&mut self.0).poll_write(cx, buf)
-        }
-
-        fn poll_flush(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_flush(cx)
-        }
-
-        fn poll_shutdown(
-            mut self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-        ) -> Poll<std::io::Result<()>> {
-            Pin::new(&mut self.0).poll_shutdown(cx)
-        }
-    }
-
-    impl hyper::client::connect::Connection for IpcStream {
-        fn connected(&self) -> hyper::client::connect::Connected {
-            hyper::client::connect::Connected::new()
-        }
-    }
-
-    pub async fn create_channel(path: String) -> Result<tonic::transport::Channel> {
-        let channel = tonic::transport::Endpoint::try_from("http://[::]:50051")?
-            .connect_with_connector(tower::service_fn(move |_: hyper::Uri| {
-                let path = path.clone();
-                async move {
-                    let stream = tokio::net::windows::named_pipe::ClientOptions::new()
-                        .open(&path)?;
-                    Ok::<_, std::io::Error>(IpcStream(stream))
-                }
-            }))
-            .await?;
-        Ok(channel)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +146,22 @@ enum StepResult {
     Skip(String),
 }
 
+impl StepResult {
+    fn status_str(&self) -> &str {
+        match self {
+            StepResult::Ok(_) => "ok",
+            StepResult::Fail(_) => "fail",
+            StepResult::Skip(_) => "skip",
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            StepResult::Ok(m) | StepResult::Fail(m) | StepResult::Skip(m) => m,
+        }
+    }
+}
+
 impl SmokeResults {
     fn new(lsp_display_name: &str) -> Self {
         Self {
@@ -329,7 +173,6 @@ impl SmokeResults {
     }
 
     fn print_summary(&self) {
-        // Pad LSP label to align with other rows
         let lsp_padded = format!("{:<12}", self.lsp_label);
 
         println!();
@@ -345,18 +188,10 @@ impl SmokeResults {
 
     fn print_step(label: &str, result: &Option<StepResult>) {
         match result {
-            Some(StepResult::Ok(msg)) => {
-                println!("  {label}  OK    {msg}");
-            }
-            Some(StepResult::Fail(msg)) => {
-                println!("  {label}  FAIL  {msg}");
-            }
-            Some(StepResult::Skip(msg)) => {
-                println!("  {label}  SKIP  {msg}");
-            }
-            None => {
-                println!("  {label}  ---   (not run)");
-            }
+            Some(StepResult::Ok(msg)) => println!("  {label}  OK    {msg}"),
+            Some(StepResult::Fail(msg)) => println!("  {label}  FAIL  {msg}"),
+            Some(StepResult::Skip(msg)) => println!("  {label}  SKIP  {msg}"),
+            None => println!("  {label}  ---   (not run)"),
         }
     }
 
@@ -372,24 +207,46 @@ impl SmokeResults {
         }
         0
     }
-}
 
-// ---------------------------------------------------------------------------
-// gRPC client wrapper (headless, no GPUI)
-// ---------------------------------------------------------------------------
+    fn has_any_fail(&self) -> bool {
+        matches!(self.devcontainer, Some(StepResult::Fail(_)))
+            || matches!(self.terminal, Some(StepResult::Fail(_)))
+            || matches!(self.lsp, Some(StepResult::Fail(_)))
+    }
 
-async fn connect_daemon() -> Result<DevContainerServiceClient<tonic::transport::Channel>> {
-    #[cfg(unix)]
-    let ipc_path = "/tmp/tala.sock".to_string();
-    #[cfg(windows)]
-    let ipc_path = "\\\\.\\pipe\\tala".to_string();
-
-    println!("[DAEMON]    Connecting to tala daemon at {ipc_path} ...");
-    let channel = ipc::create_channel(ipc_path)
-        .await
-        .context("failed to connect to tala daemon -- is it running?")?;
-    let client = DevContainerServiceClient::new(channel);
-    Ok(client)
+    fn to_json(&self, workspace: &str) -> DcSmokeJson {
+        let mut steps = Vec::new();
+        if let Some(ref step) = self.devcontainer {
+            steps.push(DcSmokeStepJson {
+                name: "devcontainer".to_string(),
+                status: step.status_str().to_string(),
+                message: step.message().to_string(),
+            });
+        }
+        if let Some(ref step) = self.terminal {
+            steps.push(DcSmokeStepJson {
+                name: "terminal".to_string(),
+                status: step.status_str().to_string(),
+                message: step.message().to_string(),
+            });
+        }
+        if let Some(ref step) = self.lsp {
+            steps.push(DcSmokeStepJson {
+                name: "lsp".to_string(),
+                status: step.status_str().to_string(),
+                message: step.message().to_string(),
+            });
+        }
+        DcSmokeJson {
+            workspace: workspace.to_string(),
+            overall: if self.has_any_fail() {
+                "fail".to_string()
+            } else {
+                "pass".to_string()
+            },
+            steps,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,8 +256,11 @@ async fn connect_daemon() -> Result<DevContainerServiceClient<tonic::transport::
 async fn step_health_and_preflight(
     client: &mut DevContainerServiceClient<tonic::transport::Channel>,
     workspace_path: &str,
+    json_mode: bool,
 ) -> Result<()> {
-    println!("[DAEMON]    Health check ...");
+    if !json_mode {
+        println!("[DAEMON]    Health check ...");
+    }
     let health = client
         .health_check(devcontainer::HealthCheckRequest {})
         .await
@@ -410,9 +270,11 @@ async fn step_health_and_preflight(
     if !health.healthy {
         bail!("daemon reported unhealthy (version={})", health.version);
     }
-    println!("[DAEMON]    Healthy (version={})", health.version);
+    if !json_mode {
+        println!("[DAEMON]    Healthy (version={})", health.version);
+        println!("[PREFLIGHT] Checking Docker availability ...");
+    }
 
-    println!("[PREFLIGHT] Checking Docker availability ...");
     let preflight = client
         .preflight_check(devcontainer::PreflightRequest {
             workspace_path: workspace_path.to_string(),
@@ -422,18 +284,14 @@ async fn step_health_and_preflight(
         .into_inner();
 
     if !preflight.docker_available {
-        bail!(
-            "docker not available: {}",
-            preflight.error_message
-        );
+        bail!("docker not available: {}", preflight.error_message);
     }
     if !preflight.docker_permissions_ok {
-        bail!(
-            "docker permissions issue: {}",
-            preflight.error_message
-        );
+        bail!("docker permissions issue: {}", preflight.error_message);
     }
-    println!("[PREFLIGHT] Passed (docker available, permissions ok)");
+    if !json_mode {
+        println!("[PREFLIGHT] Passed (docker available, permissions ok)");
+    }
     Ok(())
 }
 
@@ -446,10 +304,13 @@ async fn step_devcontainer(
     workspace_path: &str,
     config_path: &str,
     timeout: Duration,
+    json_mode: bool,
 ) -> Result<String> {
-    println!("[DEVCONTAINER] Building (timeout={}s) ...", timeout.as_secs());
-    println!("[DEVCONTAINER] workspace: {workspace_path}");
-    println!("[DEVCONTAINER] config:    {config_path}");
+    if !json_mode {
+        println!("[DEVCONTAINER] Building (timeout={}s) ...", timeout.as_secs());
+        println!("[DEVCONTAINER] workspace: {workspace_path}");
+        println!("[DEVCONTAINER] config:    {config_path}");
+    }
 
     let stream_future = async {
         let mut stream = client
@@ -475,7 +336,9 @@ async fn step_devcontainer(
                         .strip_prefix("Container ready: ")
                         .unwrap_or(&progress.message)
                         .to_string();
-                    println!("[DEVCONTAINER] Build complete -- container {cid}");
+                    if !json_mode {
+                        println!("[DEVCONTAINER] Build complete -- container {cid}");
+                    }
                     container_id = Some(cid);
                     break;
                 }
@@ -488,10 +351,12 @@ async fn step_devcontainer(
                     bail!("build failed: {error}");
                 }
                 _ => {
-                    println!(
-                        "[DEVCONTAINER] [{:?}] {}% -- {}",
-                        stage, progress.percent, progress.message
-                    );
+                    if !json_mode {
+                        println!(
+                            "[DEVCONTAINER] [{:?}] {}% -- {}",
+                            stage, progress.percent, progress.message
+                        );
+                    }
                 }
             }
         }
@@ -508,11 +373,13 @@ async fn step_devcontainer(
 }
 
 // ---------------------------------------------------------------------------
-// Step: Terminal smoke (Phase 2B) -- headless docker exec
+// Step: Terminal smoke (Phase 2B)
 // ---------------------------------------------------------------------------
 
-async fn step_terminal(container_id: &str) -> Result<()> {
-    println!("[TERMINAL]  Running: docker exec {container_id} echo SMOKE_OK");
+async fn step_terminal(container_id: &str, json_mode: bool) -> Result<()> {
+    if !json_mode {
+        println!("[TERMINAL]  Running: docker exec {container_id} echo SMOKE_OK");
+    }
 
     let output = tokio::process::Command::new("docker")
         .args(["exec", container_id, "echo", "SMOKE_OK"])
@@ -524,42 +391,41 @@ async fn step_terminal(container_id: &str) -> Result<()> {
     let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
-        bail!(
-            "docker exec exited with {}: {}",
-            output.status,
-            stderr.trim()
-        );
+        bail!("docker exec exited with {}: {}", output.status, stderr.trim());
     }
 
     if !stdout.contains("SMOKE_OK") {
-        bail!(
-            "expected SMOKE_OK in stdout, got: {}",
-            stdout.trim()
-        );
+        bail!("expected SMOKE_OK in stdout, got: {}", stdout.trim());
     }
 
-    println!("[TERMINAL]  Received SMOKE_OK");
+    if !json_mode {
+        println!("[TERMINAL]  Received SMOKE_OK");
+    }
     Ok(())
 }
 
 // ---------------------------------------------------------------------------
-// Step: LSP smoke (Phase 2C) -- generic, language-configurable
+// Step: LSP smoke (Phase 2C)
 // ---------------------------------------------------------------------------
 
-async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) -> Result<()> {
+async fn step_lsp(
+    container_id: &str,
+    project_name: &str,
+    config: &LspConfig,
+    json_mode: bool,
+) -> Result<()> {
     let tag = config.log_tag;
 
-    println!("{tag} Checking {} availability ...", config.display_name);
+    if !json_mode {
+        println!("{tag} Checking {} availability ...", config.display_name);
+    }
 
     let check_cmd = format!("command -v {}", config.check_binary);
     let capability_check = tokio::process::Command::new("docker")
         .args(["exec", container_id, "sh", "-c", &check_cmd])
         .output()
         .await
-        .context(format!(
-            "failed to check {} availability",
-            config.display_name
-        ))?;
+        .context(format!("failed to check {} availability", config.display_name))?;
 
     if !capability_check.status.success() {
         bail!(
@@ -567,12 +433,13 @@ async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) ->
             config.display_name
         );
     }
-    println!(
-        "{tag} Found: {}",
-        String::from_utf8_lossy(&capability_check.stdout).trim()
-    );
-
-    println!("{tag} Running initialize/shutdown cycle ...");
+    if !json_mode {
+        println!(
+            "{tag} Found: {}",
+            String::from_utf8_lossy(&capability_check.stdout).trim()
+        );
+        println!("{tag} Running initialize/shutdown cycle ...");
+    }
 
     let workdir = format!("/workspaces/{project_name}");
 
@@ -594,15 +461,11 @@ async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) ->
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .context(format!(
-            "failed to spawn {} via docker exec",
-            config.server_binary
-        ))?;
+        .context(format!("failed to spawn {} via docker exec", config.server_binary))?;
 
     let stdin = child.stdin.as_mut().context("no stdin")?;
     let stdout = child.stdout.as_mut().context("no stdout")?;
 
-    // Send LSP initialize request
     let root_uri = format!("file://{workdir}");
     let initialize_params = serde_json::json!({
         "jsonrpc": "2.0",
@@ -620,9 +483,6 @@ async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) ->
     });
     send_lsp_message(stdin, &initialize_params).await?;
 
-    // Read response with timeout. Some language servers (e.g. pyright) send
-    // notification messages (window/logMessage, etc.) before the initialize
-    // response. We loop reading messages until we find the one with "id": 1.
     let lsp_timeout = Duration::from_secs(60);
     let read_init_response = async {
         loop {
@@ -633,26 +493,24 @@ async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) ->
             let msg: serde_json::Value =
                 serde_json::from_str(&raw).context("invalid JSON in LSP message")?;
 
-            // Notifications have no "id" field — skip them
             if msg.get("id").is_none() {
-                let method = msg
-                    .get("method")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("<unknown>");
-                println!("{tag} (skipping notification: {method})");
+                if !json_mode {
+                    let method = msg
+                        .get("method")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("<unknown>");
+                    println!("{tag} (skipping notification: {method})");
+                }
                 continue;
             }
 
-            // Check if this is the response to our request (id: 1)
             if msg.get("id") == Some(&serde_json::json!(1)) {
                 return Ok::<serde_json::Value, anyhow::Error>(msg);
             }
 
-            // Some other response id — skip it too
-            println!(
-                "{tag} (skipping message with id={:?})",
-                msg.get("id")
-            );
+            if !json_mode {
+                println!("{tag} (skipping message with id={:?})", msg.get("id"));
+            }
         }
     };
 
@@ -680,37 +538,51 @@ async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) ->
         .pointer("/result/serverInfo/version")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    println!("{tag} Server: {server_name} v{server_version}");
+    if !json_mode {
+        println!("{tag} Server: {server_name} v{server_version}");
+    }
 
-    // Send initialized notification
-    send_lsp_message(stdin, &serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "initialized",
-        "params": {}
-    }))
+    send_lsp_message(
+        stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {}
+        }),
+    )
     .await?;
 
-    // Send shutdown request
-    send_lsp_message(stdin, &serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "shutdown",
-        "params": null
-    }))
+    send_lsp_message(
+        stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "shutdown",
+            "params": null
+        }),
+    )
     .await?;
 
-    // Send exit notification
-    send_lsp_message(stdin, &serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": null
-    }))
+    send_lsp_message(
+        stdin,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": null
+        }),
+    )
     .await?;
 
-    // Wait for child to exit (with timeout)
-    let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    // Wait briefly for child to exit; not critical if it times out
+    match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(err)) => eprintln!("{tag} warning: child wait error: {err}"),
+        Err(_) => eprintln!("{tag} warning: child did not exit within 5s"),
+    }
 
-    println!("{tag} Initialize/shutdown cycle completed");
+    if !json_mode {
+        println!("{tag} Initialize/shutdown cycle completed");
+    }
     Ok(())
 }
 
@@ -727,8 +599,6 @@ async fn send_lsp_message(
     Ok(())
 }
 
-/// Read one LSP message from a reader. Parses the `Content-Length` header and
-/// reads exactly that many bytes.
 async fn read_lsp_message(
     reader: &mut (impl tokio::io::AsyncRead + Unpin),
 ) -> Result<String> {
@@ -736,15 +606,12 @@ async fn read_lsp_message(
 
     let mut header_buf = Vec::new();
 
-    // Read headers byte-by-byte until we see \r\n\r\n
     loop {
         let mut byte = [0u8; 1];
         reader.read_exact(&mut byte).await?;
         header_buf.push(byte[0]);
 
-        if header_buf.len() >= 4
-            && header_buf[header_buf.len() - 4..] == *b"\r\n\r\n"
-        {
+        if header_buf.len() >= 4 && header_buf[header_buf.len() - 4..] == *b"\r\n\r\n" {
             break;
         }
 
@@ -774,22 +641,6 @@ async fn read_lsp_message(
 }
 
 // ---------------------------------------------------------------------------
-// Detect devcontainer config (same logic as sala_hud)
-// ---------------------------------------------------------------------------
-
-fn detect_config(workspace_path: &std::path::Path) -> Option<PathBuf> {
-    let primary = workspace_path.join(".devcontainer/devcontainer.json");
-    if primary.exists() {
-        return Some(primary);
-    }
-    let fallback = workspace_path.join(".devcontainer.json");
-    if fallback.exists() {
-        return Some(fallback);
-    }
-    None
-}
-
-// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -811,112 +662,174 @@ async fn main() {
     let workspace_str = workspace_path.to_string_lossy().to_string();
     let build_timeout = Duration::from_secs(args.max_wait_seconds);
     let lsp_config = args.lsp_config;
+    let json_mode = args.json;
 
     let project_name = workspace_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "workspace".to_string());
 
-    println!("=== Sala DevContainer Smoke Test ===");
-    println!("workspace:  {workspace_str}");
-    println!("project:    {project_name}");
-    println!("language:   {}", lsp_config.display_name);
-    println!("timeout:    {}s", build_timeout.as_secs());
-    println!();
+    if !json_mode {
+        println!("=== dc-smoke — DevContainer Smoke Test ===");
+        println!("workspace:  {workspace_str}");
+        println!("project:    {project_name}");
+        println!("language:   {}", lsp_config.display_name);
+        println!("timeout:    {}s", build_timeout.as_secs());
+        println!();
+    }
 
     let mut results = SmokeResults::new(lsp_config.display_name);
 
     // -- Connect ----------------------------------------------------------
-    let mut client = match connect_daemon().await {
+    if !json_mode {
+        println!(
+            "[DAEMON]    Connecting to tala daemon at {} ...",
+            ipc::TALA_SOCKET
+        );
+    }
+    let mut client = match ipc::connect_tala().await {
         Ok(c) => c,
         Err(err) => {
-            eprintln!("[DAEMON]    FAIL: {err}");
+            if !json_mode {
+                eprintln!("[DAEMON]    FAIL: {err}");
+            }
             results.devcontainer = Some(StepResult::Fail(format!("connect: {err}")));
             results.terminal = Some(StepResult::Skip("no daemon".into()));
             results.lsp = Some(StepResult::Skip("no daemon".into()));
-            results.print_summary();
+            if json_mode {
+                print_json(&results, &workspace_str);
+            } else {
+                results.print_summary();
+            }
             std::process::exit(1);
         }
     };
-    println!("[DAEMON]    Connected");
+    if !json_mode {
+        println!("[DAEMON]    Connected");
+    }
 
     // -- Health + Preflight -----------------------------------------------
-    if let Err(err) = step_health_and_preflight(&mut client, &workspace_str).await {
-        eprintln!("[PREFLIGHT] FAIL: {err}");
+    if let Err(err) = step_health_and_preflight(&mut client, &workspace_str, json_mode).await {
+        if !json_mode {
+            eprintln!("[PREFLIGHT] FAIL: {err}");
+        }
         results.devcontainer = Some(StepResult::Fail(format!("{err}")));
         results.terminal = Some(StepResult::Skip("preflight failed".into()));
         results.lsp = Some(StepResult::Skip("preflight failed".into()));
-        results.print_summary();
+        if json_mode {
+            print_json(&results, &workspace_str);
+        } else {
+            results.print_summary();
+        }
         std::process::exit(2);
     }
 
     // -- Detect config ----------------------------------------------------
-    let config_path = match detect_config(&workspace_path) {
+    let config_path = match ipc::detect_devcontainer_config(&workspace_path) {
         Some(p) => p,
         None => {
-            eprintln!("[DEVCONTAINER] FAIL: no .devcontainer/devcontainer.json found");
+            if !json_mode {
+                eprintln!("[DEVCONTAINER] FAIL: no .devcontainer/devcontainer.json found");
+            }
             results.devcontainer = Some(StepResult::Fail(
                 "no .devcontainer/devcontainer.json found".into(),
             ));
             results.terminal = Some(StepResult::Skip("no config".into()));
             results.lsp = Some(StepResult::Skip("no config".into()));
-            results.print_summary();
+            if json_mode {
+                print_json(&results, &workspace_str);
+            } else {
+                results.print_summary();
+            }
             std::process::exit(3);
         }
     };
     let config_str = config_path.to_string_lossy().to_string();
-    println!("[DEVCONTAINER] Config: {config_str}");
+    if !json_mode {
+        println!("[DEVCONTAINER] Config: {config_str}");
+    }
 
     // -- Build / Connect --------------------------------------------------
-    let container_id =
-        match step_devcontainer(&mut client, &workspace_str, &config_str, build_timeout).await {
-            Ok(cid) => {
-                results.devcontainer = Some(StepResult::Ok(format!(
-                    "container {}",
-                    &cid[..cid.len().min(12)]
-                )));
-                cid
-            }
-            Err(err) => {
+    let container_id = match step_devcontainer(
+        &mut client,
+        &workspace_str,
+        &config_str,
+        build_timeout,
+        json_mode,
+    )
+    .await
+    {
+        Ok(cid) => {
+            results.devcontainer = Some(StepResult::Ok(format!(
+                "container {}",
+                &cid[..cid.len().min(12)]
+            )));
+            cid
+        }
+        Err(err) => {
+            if !json_mode {
                 eprintln!("[DEVCONTAINER] FAIL: {err}");
-                results.devcontainer = Some(StepResult::Fail(format!("{err}")));
-                results.terminal = Some(StepResult::Skip("no container".into()));
-                results.lsp = Some(StepResult::Skip("no container".into()));
-                results.print_summary();
-                std::process::exit(4);
             }
-        };
+            results.devcontainer = Some(StepResult::Fail(format!("{err}")));
+            results.terminal = Some(StepResult::Skip("no container".into()));
+            results.lsp = Some(StepResult::Skip("no container".into()));
+            if json_mode {
+                print_json(&results, &workspace_str);
+            } else {
+                results.print_summary();
+            }
+            std::process::exit(4);
+        }
+    };
 
     // -- Terminal ---------------------------------------------------------
-    match step_terminal(&container_id).await {
+    match step_terminal(&container_id, json_mode).await {
         Ok(()) => {
             results.terminal = Some(StepResult::Ok("echo SMOKE_OK received".into()));
         }
         Err(err) => {
-            eprintln!("[TERMINAL]  FAIL: {err}");
+            if !json_mode {
+                eprintln!("[TERMINAL]  FAIL: {err}");
+            }
             results.terminal = Some(StepResult::Fail(format!("{err}")));
         }
     }
 
     // -- LSP --------------------------------------------------------------
     let tag = lsp_config.log_tag;
-    match step_lsp(&container_id, &project_name, &lsp_config).await {
+    match step_lsp(&container_id, &project_name, &lsp_config, json_mode).await {
         Ok(()) => {
             results.lsp = Some(StepResult::Ok("initialize/shutdown ok".into()));
         }
         Err(err) => {
             let msg = format!("{err}");
             if msg.contains("not found in container") {
-                println!("{tag} SKIP: {msg}");
+                if !json_mode {
+                    println!("{tag} SKIP: {msg}");
+                }
                 results.lsp = Some(StepResult::Skip(msg));
             } else {
-                eprintln!("{tag} FAIL: {msg}");
+                if !json_mode {
+                    eprintln!("{tag} FAIL: {msg}");
+                }
                 results.lsp = Some(StepResult::Fail(msg));
             }
         }
     }
 
     // -- Summary ----------------------------------------------------------
-    results.print_summary();
+    if json_mode {
+        print_json(&results, &workspace_str);
+    } else {
+        results.print_summary();
+    }
     std::process::exit(results.exit_code());
+}
+
+fn print_json(results: &SmokeResults, workspace: &str) {
+    let json = results.to_json(workspace);
+    match serde_json::to_string_pretty(&json) {
+        Ok(s) => println!("{s}"),
+        Err(err) => eprintln!("JSON serialization failed: {err}"),
+    }
 }

@@ -1,23 +1,19 @@
-// DevContainer status inspector for Sala.
+// dc-status — DevContainer status inspector (direct Docker view).
 //
 // Discovers running DevContainers via `docker ps`, checks capabilities
 // (terminal, rust-analyzer, pyright), and prints the results using the
 // shared HUD model from `sala_hud::devcontainer_hud`.
 //
+// This tool queries Docker directly (not via Tala), providing a raw
+// "what Docker sees" perspective.
+//
 // # Usage
 //
 // ```sh
-// # Show all running DevContainers:
-// cargo run -p sala_devtools --bin devcontainer_status
-//
-// # Filter to a specific workspace:
-// cargo run -p sala_devtools --bin devcontainer_status -- --workspace /workspace/_JAGORA/playground-rust
-//
-// # JSON output:
-// cargo run -p sala_devtools --bin devcontainer_status -- --json
-//
-// # Or use the Makefile shortcut:
-// make -C crates/sala_devtools status
+// dc-status
+// dc-status --workspace /workspace/_JAGORA/playground-rust
+// dc-status --json
+// dc-status --verbose
 // ```
 
 use sala_hud::{DevContainerHud, DevContainerPhase};
@@ -27,42 +23,49 @@ use std::path::PathBuf;
 struct CliArgs {
     workspace: Option<PathBuf>,
     json: bool,
+    verbose: bool,
 }
 
 fn parse_args() -> CliArgs {
-    let args: Vec<String> = std::env::args().collect();
-    let mut workspace = None;
-    let mut json = false;
-    let mut idx = 1;
-    while idx < args.len() {
-        match args[idx].as_str() {
-            "--workspace" | "-w" => {
-                idx += 1;
-                if idx < args.len() {
-                    workspace = Some(PathBuf::from(&args[idx]));
-                } else {
-                    eprintln!("error: --workspace requires an argument");
-                    std::process::exit(1);
-                }
-            }
-            "--json" | "-j" => json = true,
-            "--help" | "-h" => {
-                println!("Usage: devcontainer_status [OPTIONS]");
-                println!();
-                println!("Options:");
-                println!("  -w, --workspace <PATH>  Filter to a specific workspace");
-                println!("  -j, --json              Output as JSON");
-                println!("  -h, --help              Show this help");
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("error: unexpected argument: {other}");
-                std::process::exit(1);
-            }
-        }
-        idx += 1;
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        println!("Usage: dc-status [OPTIONS]");
+        println!();
+        println!("Show running DevContainers discovered via Docker.");
+        println!();
+        println!("Options:");
+        println!("  -w, --workspace <PATH>  Filter to a specific workspace");
+        println!("  -j, --json              Output as JSON");
+        println!("  -v, --verbose           Show extra detail (container IDs, etc.)");
+        println!("  -h, --help              Show this help");
+        std::process::exit(0);
     }
-    CliArgs { workspace, json }
+
+    let common = sala_devtools::cli::parse_common_args(&mut args);
+
+    // workspace from common is always set (defaults to cwd); but dc-status
+    // traditionally shows ALL containers unless --workspace is given.
+    // We detect whether --workspace was explicitly provided by checking
+    // if parse_common_args consumed a -w/--workspace flag.
+    // Since parse_common_args already consumed it, we need a different approach:
+    // check the original args for --workspace/-w presence.
+    let original_args: Vec<String> = std::env::args().collect();
+    let workspace_explicit = original_args
+        .iter()
+        .any(|a| a == "--workspace" || a == "-w" || a.starts_with("--workspace=") || a.starts_with("-w="));
+
+    let workspace = if workspace_explicit {
+        Some(common.workspace)
+    } else {
+        None
+    };
+
+    CliArgs {
+        workspace,
+        json: common.json,
+        verbose: common.verbose,
+    }
 }
 
 struct DiscoveredContainer {
@@ -156,6 +159,7 @@ const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str = "\x1b[36m";
 const BOLD: &str = "\x1b[1m";
+const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 
 fn phase_colored(phase: &DevContainerPhase, use_color: bool) -> String {
@@ -181,7 +185,7 @@ fn capability_colored(ok: bool, use_color: bool) -> &'static str {
     }
 }
 
-pub fn format_colored_table(hud: &DevContainerHud, use_color: bool) -> String {
+pub fn format_colored_table(hud: &DevContainerHud, use_color: bool, verbose: bool) -> String {
     let statuses = hud.all_statuses();
     if statuses.is_empty() {
         return "No running DevContainers found.".to_string();
@@ -208,11 +212,13 @@ pub fn format_colored_table(hud: &DevContainerHud, use_color: bool) -> String {
     let mut lines = vec![header, separator];
 
     for status in statuses.values() {
-        let container_short = status
+        let container_display = status
             .container_id
             .as_ref()
             .map(|id| {
-                if id.len() > 12 {
+                if verbose {
+                    id.as_str()
+                } else if id.len() > 12 {
                     &id[..12]
                 } else {
                     id.as_str()
@@ -221,7 +227,6 @@ pub fn format_colored_table(hud: &DevContainerHud, use_color: bool) -> String {
             .unwrap_or("\u{2014}");
 
         let cap = &status.capabilities;
-        // Phase column uses fixed-width for alignment, but ANSI codes are zero-width
         let phase_str = phase_colored(&status.phase, use_color);
         let phase_pad = 12_usize.saturating_sub(status.phase.label().len());
 
@@ -230,12 +235,23 @@ pub fn format_colored_table(hud: &DevContainerHud, use_color: bool) -> String {
             status.workspace_root.display(),
             phase_str,
             "",
-            container_short,
+            container_display,
             capability_colored(cap.terminal_ok, use_color),
             capability_colored(cap.lsp_rust_ok, use_color),
             capability_colored(cap.lsp_python_ok, use_color),
             pad = phase_pad,
         ));
+
+        if verbose {
+            if use_color {
+                lines.push(format!(
+                    "  {DIM}project: {}{RESET}",
+                    status.project_name
+                ));
+            } else {
+                lines.push(format!("  project: {}", status.project_name));
+            }
+        }
     }
 
     lines.join("\n")
@@ -278,7 +294,7 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|err| anyhow::anyhow!("JSON serialization failed: {err}"))?;
         println!("{json}");
     } else {
-        println!("{}", format_colored_table(&hud, use_color));
+        println!("{}", format_colored_table(&hud, use_color, args.verbose));
     }
 
     Ok(())
@@ -291,7 +307,7 @@ mod tests {
     #[test]
     fn test_format_colored_table_empty() {
         let hud = DevContainerHud::new();
-        let output = format_colored_table(&hud, false);
+        let output = format_colored_table(&hud, false, false);
         assert_eq!(output, "No running DevContainers found.");
     }
 
@@ -306,7 +322,7 @@ mod tests {
         hud.on_lsp_rust_result(&ws, true);
         hud.on_lsp_python_result(&ws, false);
 
-        let output = format_colored_table(&hud, false);
+        let output = format_colored_table(&hud, false, false);
         assert!(output.contains("Workspace"));
         assert!(output.contains("Phase"));
         assert!(output.contains("Running"));
@@ -323,10 +339,24 @@ mod tests {
         hud.on_container_started(&ws, "abc123".to_string());
         hud.on_terminal_smoke_result(&ws, true);
 
-        let output = format_colored_table(&hud, true);
-        // Should contain ANSI escape codes
+        let output = format_colored_table(&hud, true, false);
         assert!(output.contains("\x1b["));
         assert!(output.contains("Running"));
+    }
+
+    #[test]
+    fn test_format_colored_table_verbose() {
+        let mut hud = DevContainerHud::new();
+        let ws = PathBuf::from("/workspace/verbose-test");
+
+        hud.on_preflight_started(ws.clone(), "verbose-test".to_string());
+        hud.on_container_started(&ws, "abc123def456789full".to_string());
+        hud.on_terminal_smoke_result(&ws, true);
+
+        let output = format_colored_table(&hud, false, true);
+        // Verbose shows full container ID and project name
+        assert!(output.contains("abc123def456789full"));
+        assert!(output.contains("project: verbose-test"));
     }
 
     #[test]
