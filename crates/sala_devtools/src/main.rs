@@ -8,14 +8,18 @@
 // # Usage
 //
 // ```sh
-// # Run against a workspace (with tala already running):
+// # Rust project (default):
 // cargo run -p sala_devtools --bin devcontainer_smoke_test -- /workspace/_JAGORA/playground-rust
+//
+// # Python project:
+// cargo run -p sala_devtools --bin devcontainer_smoke_test -- --language python /workspace/_JAGORA/playground-python
 //
 // # Override the default build timeout (600s):
 // cargo run -p sala_devtools --bin devcontainer_smoke_test -- --max-wait-seconds 120 /workspace/_JAGORA/playground-rust
 //
-// # Or use the Makefile shortcut (starts tala if needed):
+// # Or use the Makefile shortcut:
 // make -C crates/sala_devtools smoke
+// make -C crates/sala_devtools smoke-python
 // ```
 //
 // # Preconditions
@@ -26,6 +30,9 @@
 //   to run `docker` commands without sudo.
 // - The target workspace must contain `.devcontainer/devcontainer.json` or
 //   `.devcontainer.json`.
+// - For `--language rust`: rust-analyzer must be installed in the container.
+// - For `--language python`: pyright-langserver must be installed in the
+//   container (typically via `npm install -g pyright`).
 //
 // # Exit codes
 //
@@ -52,52 +59,103 @@ use std::time::Duration;
 const DEFAULT_MAX_WAIT_SECONDS: u64 = 600;
 
 // ---------------------------------------------------------------------------
+// Language configuration
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct LspConfig {
+    /// Display name shown in logs and summary, e.g. "rust-analyzer", "pyright"
+    display_name: &'static str,
+    /// Binary to check for in the container
+    check_binary: &'static str,
+    /// Binary to run as LSP server
+    server_binary: &'static str,
+    /// Extra arguments after the binary (e.g. ["--stdio"] for pyright)
+    server_args: Vec<&'static str>,
+    /// Log tag prefix, e.g. "[LSP-RUST]  ", "[LSP-PYTHON]"
+    log_tag: &'static str,
+}
+
+impl LspConfig {
+    fn rust() -> Self {
+        Self {
+            display_name: "rust-analyzer",
+            check_binary: "rust-analyzer",
+            server_binary: "rust-analyzer",
+            server_args: vec![],
+            log_tag: "[LSP-RUST]  ",
+        }
+    }
+
+    fn python() -> Self {
+        Self {
+            display_name: "pyright",
+            check_binary: "pyright-langserver",
+            server_binary: "pyright-langserver",
+            server_args: vec!["--stdio"],
+            log_tag: "[LSP-PYTHON]",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CLI argument parsing (no external deps)
 // ---------------------------------------------------------------------------
 
 struct Args {
     workspace_path: PathBuf,
     max_wait_seconds: u64,
+    lsp_config: LspConfig,
+}
+
+fn extract_flag(args: &mut Vec<String>, flag: &str) -> Option<String> {
+    // --flag value
+    if let Some(pos) = args.iter().position(|a| a == flag) {
+        if pos + 1 < args.len() {
+            let val = args[pos + 1].clone();
+            args.drain(pos..=pos + 1);
+            return Some(val);
+        }
+    }
+    // --flag=value
+    let prefix = format!("{flag}=");
+    if let Some(pos) = args.iter().position(|a| a.starts_with(&prefix)) {
+        let val = args[pos][prefix.len()..].to_string();
+        args.remove(pos);
+        return Some(val);
+    }
+    None
 }
 
 fn parse_args() -> Result<Args> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let mut max_wait_seconds = DEFAULT_MAX_WAIT_SECONDS;
-
-    // Extract --max-wait-seconds <N> if present
-    if let Some(pos) = args.iter().position(|a| a == "--max-wait-seconds") {
-        if pos + 1 >= args.len() {
-            bail!("--max-wait-seconds requires a value");
-        }
-        max_wait_seconds = args[pos + 1]
-            .parse()
-            .context("--max-wait-seconds must be a positive integer")?;
-        args.drain(pos..=pos + 1);
-    }
-
-    // Also support --max-wait-seconds=N
-    if let Some(pos) = args.iter().position(|a| a.starts_with("--max-wait-seconds=")) {
-        let val = args[pos]
-            .strip_prefix("--max-wait-seconds=")
-            .context("bad flag")?;
-        max_wait_seconds = val
-            .parse()
-            .context("--max-wait-seconds must be a positive integer")?;
-        args.remove(pos);
-    }
 
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: devcontainer_smoke_test [OPTIONS] [WORKSPACE_PATH]");
         println!();
         println!("Options:");
-        println!("  --max-wait-seconds <N>  Build timeout in seconds (default: {DEFAULT_MAX_WAIT_SECONDS})");
-        println!("  -h, --help              Show this help");
+        println!("  --max-wait-seconds <N>     Build timeout in seconds (default: {DEFAULT_MAX_WAIT_SECONDS})");
+        println!("  --language <rust|python>    Language LSP to test (default: rust)");
+        println!("  -h, --help                 Show this help");
         println!();
         println!("WORKSPACE_PATH defaults to the current directory.");
         std::process::exit(0);
     }
 
-    // Remaining positional arg is the workspace path
+    let max_wait_seconds: u64 = extract_flag(&mut args, "--max-wait-seconds")
+        .map(|v| v.parse().context("--max-wait-seconds must be a positive integer"))
+        .transpose()?
+        .unwrap_or(DEFAULT_MAX_WAIT_SECONDS);
+
+    let language = extract_flag(&mut args, "--language")
+        .unwrap_or_else(|| "rust".to_string());
+
+    let lsp_config = match language.as_str() {
+        "rust" => LspConfig::rust(),
+        "python" => LspConfig::python(),
+        other => bail!("unsupported --language value: {other} (expected: rust, python)"),
+    };
+
     let workspace_path = match args.into_iter().find(|a| !a.starts_with('-')) {
         Some(p) => PathBuf::from(p),
         None => std::env::current_dir().context("cannot determine current directory")?,
@@ -106,6 +164,7 @@ fn parse_args() -> Result<Args> {
     Ok(Args {
         workspace_path,
         max_wait_seconds,
+        lsp_config,
     })
 }
 
@@ -250,6 +309,7 @@ struct SmokeResults {
     devcontainer: Option<StepResult>,
     terminal: Option<StepResult>,
     lsp: Option<StepResult>,
+    lsp_label: String,
 }
 
 enum StepResult {
@@ -259,22 +319,26 @@ enum StepResult {
 }
 
 impl SmokeResults {
-    fn new() -> Self {
+    fn new(lsp_display_name: &str) -> Self {
         Self {
             devcontainer: None,
             terminal: None,
             lsp: None,
+            lsp_label: format!("LSP ({lsp_display_name})"),
         }
     }
 
     fn print_summary(&self) {
+        // Pad LSP label to align with other rows
+        let lsp_padded = format!("{:<12}", self.lsp_label);
+
         println!();
         println!("========================================");
         println!("  DevContainer Smoke Test  --  Summary  ");
         println!("========================================");
         Self::print_step("DevContainer", &self.devcontainer);
         Self::print_step("Terminal    ", &self.terminal);
-        Self::print_step("LSP (r-a)  ", &self.lsp);
+        Self::print_step(&lsp_padded, &self.lsp);
         println!("========================================");
         println!();
     }
@@ -296,7 +360,6 @@ impl SmokeResults {
         }
     }
 
-    /// Returns the most specific non-zero exit code for the first failure.
     fn exit_code(&self) -> i32 {
         if matches!(self.devcontainer, Some(StepResult::Fail(_))) {
             return 4;
@@ -480,42 +543,61 @@ async fn step_terminal(container_id: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// Step: LSP smoke (Phase 2C) -- headless rust-analyzer via docker exec
+// Step: LSP smoke (Phase 2C) -- generic, language-configurable
 // ---------------------------------------------------------------------------
 
-async fn step_lsp(container_id: &str, project_name: &str) -> Result<()> {
-    println!("[LSP]       Checking rust-analyzer availability ...");
+async fn step_lsp(container_id: &str, project_name: &str, config: &LspConfig) -> Result<()> {
+    let tag = config.log_tag;
 
-    let ra_check = tokio::process::Command::new("docker")
-        .args([
-            "exec",
-            container_id,
-            "sh",
-            "-c",
-            "command -v rust-analyzer",
-        ])
+    println!("{tag} Checking {} availability ...", config.display_name);
+
+    let check_cmd = format!("command -v {}", config.check_binary);
+    let capability_check = tokio::process::Command::new("docker")
+        .args(["exec", container_id, "sh", "-c", &check_cmd])
         .output()
         .await
-        .context("failed to check rust-analyzer availability")?;
+        .context(format!(
+            "failed to check {} availability",
+            config.display_name
+        ))?;
 
-    if !ra_check.status.success() {
-        bail!("rust-analyzer not found in container (install it for LSP tests)");
+    if !capability_check.status.success() {
+        bail!(
+            "{} not found in container (install it for LSP tests)",
+            config.display_name
+        );
     }
     println!(
-        "[LSP]       Found: {}",
-        String::from_utf8_lossy(&ra_check.stdout).trim()
+        "{tag} Found: {}",
+        String::from_utf8_lossy(&capability_check.stdout).trim()
     );
 
-    println!("[LSP]       Running initialize/shutdown cycle ...");
+    println!("{tag} Running initialize/shutdown cycle ...");
 
     let workdir = format!("/workspaces/{project_name}");
+
+    let mut docker_args = vec![
+        "exec".to_string(),
+        "-i".to_string(),
+        "-w".to_string(),
+        workdir.clone(),
+        container_id.to_string(),
+        config.server_binary.to_string(),
+    ];
+    for arg in &config.server_args {
+        docker_args.push(arg.to_string());
+    }
+
     let mut child = tokio::process::Command::new("docker")
-        .args(["exec", "-i", "-w", &workdir, container_id, "rust-analyzer"])
+        .args(&docker_args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
-        .context("failed to spawn rust-analyzer via docker exec")?;
+        .context(format!(
+            "failed to spawn {} via docker exec",
+            config.server_binary
+        ))?;
 
     let stdin = child.stdin.as_mut().context("no stdin")?;
     let stdout = child.stdout.as_mut().context("no stdout")?;
@@ -538,21 +620,54 @@ async fn step_lsp(container_id: &str, project_name: &str) -> Result<()> {
     });
     send_lsp_message(stdin, &initialize_params).await?;
 
-    // Read response with timeout
-    let response = tokio::time::timeout(
-        Duration::from_secs(30),
-        read_lsp_message(stdout),
-    )
-    .await
-    .context("timeout waiting for LSP initialize response")?
-    .context("failed to read LSP response")?;
+    // Read response with timeout. Some language servers (e.g. pyright) send
+    // notification messages (window/logMessage, etc.) before the initialize
+    // response. We loop reading messages until we find the one with "id": 1.
+    let lsp_timeout = Duration::from_secs(60);
+    let read_init_response = async {
+        loop {
+            let raw = read_lsp_message(stdout)
+                .await
+                .context("failed to read LSP message")?;
 
-    let parsed: serde_json::Value =
-        serde_json::from_str(&response).context("invalid JSON in LSP response")?;
+            let msg: serde_json::Value =
+                serde_json::from_str(&raw).context("invalid JSON in LSP message")?;
+
+            // Notifications have no "id" field — skip them
+            if msg.get("id").is_none() {
+                let method = msg
+                    .get("method")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("<unknown>");
+                println!("{tag} (skipping notification: {method})");
+                continue;
+            }
+
+            // Check if this is the response to our request (id: 1)
+            if msg.get("id") == Some(&serde_json::json!(1)) {
+                return Ok::<serde_json::Value, anyhow::Error>(msg);
+            }
+
+            // Some other response id — skip it too
+            println!(
+                "{tag} (skipping message with id={:?})",
+                msg.get("id")
+            );
+        }
+    };
+
+    let parsed = tokio::time::timeout(lsp_timeout, read_init_response)
+        .await
+        .context(format!(
+            "timeout ({}s) waiting for {} initialize response",
+            lsp_timeout.as_secs(),
+            config.display_name
+        ))??;
 
     if parsed.get("error").is_some() {
         bail!(
-            "LSP initialize returned error: {}",
+            "{} initialize returned error: {}",
+            config.display_name,
             serde_json::to_string_pretty(&parsed["error"])?
         );
     }
@@ -565,7 +680,7 @@ async fn step_lsp(container_id: &str, project_name: &str) -> Result<()> {
         .pointer("/result/serverInfo/version")
         .and_then(|v| v.as_str())
         .unwrap_or("?");
-    println!("[LSP]       Server: {server_name} v{server_version}");
+    println!("{tag} Server: {server_name} v{server_version}");
 
     // Send initialized notification
     send_lsp_message(stdin, &serde_json::json!({
@@ -595,7 +710,7 @@ async fn step_lsp(container_id: &str, project_name: &str) -> Result<()> {
     // Wait for child to exit (with timeout)
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
 
-    println!("[LSP]       Initialize/shutdown cycle completed");
+    println!("{tag} Initialize/shutdown cycle completed");
     Ok(())
 }
 
@@ -695,6 +810,7 @@ async fn main() {
         .unwrap_or_else(|_| args.workspace_path.clone());
     let workspace_str = workspace_path.to_string_lossy().to_string();
     let build_timeout = Duration::from_secs(args.max_wait_seconds);
+    let lsp_config = args.lsp_config;
 
     let project_name = workspace_path
         .file_name()
@@ -704,10 +820,11 @@ async fn main() {
     println!("=== Sala DevContainer Smoke Test ===");
     println!("workspace:  {workspace_str}");
     println!("project:    {project_name}");
+    println!("language:   {}", lsp_config.display_name);
     println!("timeout:    {}s", build_timeout.as_secs());
     println!();
 
-    let mut results = SmokeResults::new();
+    let mut results = SmokeResults::new(lsp_config.display_name);
 
     // -- Connect ----------------------------------------------------------
     let mut client = match connect_daemon().await {
@@ -782,17 +899,18 @@ async fn main() {
     }
 
     // -- LSP --------------------------------------------------------------
-    match step_lsp(&container_id, &project_name).await {
+    let tag = lsp_config.log_tag;
+    match step_lsp(&container_id, &project_name, &lsp_config).await {
         Ok(()) => {
             results.lsp = Some(StepResult::Ok("initialize/shutdown ok".into()));
         }
         Err(err) => {
             let msg = format!("{err}");
             if msg.contains("not found in container") {
-                println!("[LSP]       SKIP: {msg}");
+                println!("{tag} SKIP: {msg}");
                 results.lsp = Some(StepResult::Skip(msg));
             } else {
-                eprintln!("[LSP]       FAIL: {msg}");
+                eprintln!("{tag} FAIL: {msg}");
                 results.lsp = Some(StepResult::Fail(msg));
             }
         }

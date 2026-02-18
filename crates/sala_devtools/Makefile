@@ -1,15 +1,18 @@
 # Sala DevTools — local development targets
 #
 # Usage:
-#   make smoke                    # run smoke test against playground-rust
-#   make smoke WORKSPACE=/my/proj # run against a custom workspace
-#   make smoke TIMEOUT=120        # override build timeout
+#   make smoke                          # Rust LSP against playground-rust
+#   make smoke-python                   # Python LSP against playground-python
+#   make smoke WORKSPACE=/my/proj       # custom workspace
+#   make smoke TIMEOUT=120              # override build timeout
+#   make smoke LANGUAGE=python          # override language
 
-WORKSPACE ?= /workspace/_JAGORA/playground-rust
-TIMEOUT   ?= 600
-TALA_SOCK ?= /tmp/tala.sock
+WORKSPACE  ?= /workspace/_JAGORA/playground-rust
+TIMEOUT    ?= 600
+LANGUAGE   ?= rust
+TALA_SOCK  ?= /tmp/tala.sock
 
-.PHONY: smoke smoke-build check-tala
+.PHONY: smoke smoke-python smoke-build check-tala
 
 smoke-build:
 	@echo "--- Building smoke test binary ---"
@@ -28,10 +31,23 @@ check-tala:
 
 smoke: smoke-build check-tala
 	@echo ""
-	@echo "--- Running DevContainer Smoke Test ---"
+	@echo "--- Running DevContainer Smoke Test ($(LANGUAGE)) ---"
 	@echo "    workspace: $(WORKSPACE)"
+	@echo "    language:  $(LANGUAGE)"
 	@echo "    timeout:   $(TIMEOUT)s"
 	@echo ""
 	cargo run -p sala_devtools --bin devcontainer_smoke_test -- \
+		--language $(LANGUAGE) \
 		--max-wait-seconds $(TIMEOUT) \
 		$(WORKSPACE)
+
+smoke-python: smoke-build check-tala
+	@echo ""
+	@echo "--- Running DevContainer Smoke Test (python) ---"
+	@echo "    workspace: /workspace/_JAGORA/playground-python"
+	@echo "    timeout:   $(TIMEOUT)s"
+	@echo ""
+	cargo run -p sala_devtools --bin devcontainer_smoke_test -- \
+		--language python \
+		--max-wait-seconds $(TIMEOUT) \
+		/workspace/_JAGORA/playground-python

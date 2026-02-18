@@ -245,35 +245,32 @@ impl TalaDaemonClient {
         Ok(response.into_inner())
     }
 
-    /// Check whether rust-analyzer is available inside the given container.
-    async fn check_lsp_capability(container_id: &str) -> bool {
+    /// Check whether a given binary is available inside the container.
+    async fn check_lsp_capability(container_id: &str, binary: &str) -> bool {
         log::info!(
-            "checking rust-analyzer availability in container {}",
+            "checking {} availability in container {}",
+            binary,
             container_id
         );
+        let check_cmd = format!("command -v {binary}");
         let output = tokio::process::Command::new("docker")
-            .args(["exec", container_id, "sh", "-c", "command -v rust-analyzer"])
+            .args(["exec", container_id, "sh", "-c", &check_cmd])
             .output()
             .await;
         match output {
             Ok(output) => {
                 let available = output.status.success();
                 if available {
-                    log::info!(
-                        "rust-analyzer found in container {}",
-                        container_id
-                    );
+                    log::info!("{} found in container {}", binary, container_id);
                 } else {
-                    log::warn!(
-                        "rust-analyzer not found in container {}",
-                        container_id
-                    );
+                    log::warn!("{} not found in container {}", binary, container_id);
                 }
                 available
             }
             Err(error) => {
                 log::error!(
-                    "failed to check rust-analyzer in container {}: {}",
+                    "failed to check {} in container {}: {}",
+                    binary,
                     container_id,
                     error
                 );
@@ -283,57 +280,91 @@ impl TalaDaemonClient {
     }
 }
 
-/// LSP adapter that routes rust-analyzer requests through `docker exec` to a
-/// running DevContainer. Registered dynamically when a container connects and
-/// removed when it disconnects, so the editor falls back to the host
-/// rust-analyzer automatically.
-struct ContainerRustLspAdapter {
+/// Generic LSP adapter that routes language server requests through
+/// `docker exec` to a running DevContainer. Configured per-language via
+/// constructor parameters. Registered dynamically when a container connects
+/// and removed when it disconnects, so the editor falls back to the host
+/// language server automatically.
+struct ContainerLspAdapter {
     container_id: String,
     project_name: String,
+    server_name: LanguageServerName,
+    server_binary: String,
+    server_args: Vec<String>,
+    language_name: LanguageName,
+    lsp_language_id: String,
+    diagnostic_sources: Vec<String>,
+    diagnostics_progress_token: Option<String>,
 }
 
-impl ContainerRustLspAdapter {
-    const SERVER_NAME: LanguageServerName = LanguageServerName::new_static("rust-analyzer");
-
-    fn new(container_id: String, project_name: String) -> Self {
+impl ContainerLspAdapter {
+    fn rust(container_id: String, project_name: String) -> Self {
         Self {
             container_id,
             project_name,
+            server_name: LanguageServerName::new_static("rust-analyzer"),
+            server_binary: "rust-analyzer".to_string(),
+            server_args: vec![],
+            language_name: LanguageName::new("Rust"),
+            lsp_language_id: "rust".to_string(),
+            diagnostic_sources: vec!["rustc".to_owned()],
+            diagnostics_progress_token: Some("rust-analyzer/flycheck".into()),
+        }
+    }
+
+    fn python(container_id: String, project_name: String) -> Self {
+        Self {
+            container_id,
+            project_name,
+            server_name: LanguageServerName::new_static("pyright"),
+            server_binary: "pyright-langserver".to_string(),
+            server_args: vec!["--stdio".to_string()],
+            language_name: LanguageName::new("Python"),
+            lsp_language_id: "python".to_string(),
+            diagnostic_sources: vec![],
+            diagnostics_progress_token: None,
         }
     }
 
     fn build_binary(&self) -> LanguageServerBinary {
+        let mut arguments = vec![
+            OsString::from("exec"),
+            OsString::from("-i"),
+            OsString::from("-w"),
+            OsString::from(format!("/workspaces/{}", self.project_name)),
+            OsString::from(&self.container_id),
+            OsString::from(&self.server_binary),
+        ];
+        for arg in &self.server_args {
+            arguments.push(OsString::from(arg));
+        }
         LanguageServerBinary {
             path: PathBuf::from("docker"),
-            arguments: vec![
-                OsString::from("exec"),
-                OsString::from("-i"),
-                OsString::from("-w"),
-                OsString::from(format!("/workspaces/{}", self.project_name)),
-                OsString::from(&self.container_id),
-                OsString::from("rust-analyzer"),
-            ],
+            arguments,
             env: None,
         }
     }
 }
 
 #[async_trait(?Send)]
-impl LspAdapter for ContainerRustLspAdapter {
+impl LspAdapter for ContainerLspAdapter {
     fn name(&self) -> LanguageServerName {
-        Self::SERVER_NAME
+        self.server_name.clone()
     }
 
     fn disk_based_diagnostic_sources(&self) -> Vec<String> {
-        vec!["rustc".to_owned()]
+        self.diagnostic_sources.clone()
     }
 
     fn disk_based_diagnostics_progress_token(&self) -> Option<String> {
-        Some("rust-analyzer/flycheck".into())
+        self.diagnostics_progress_token.clone()
     }
 
     fn language_ids(&self) -> HashMap<LanguageName, String> {
-        HashMap::from_iter([(LanguageName::new("Rust"), "rust".to_string())])
+        HashMap::from_iter([(
+            self.language_name.clone(),
+            self.lsp_language_id.clone(),
+        )])
     }
 
     fn prepare_initialize_params(
@@ -373,16 +404,17 @@ impl LspAdapter for ContainerRustLspAdapter {
         }
 
         log::info!(
-            "remapped LSP root to {} for container {}",
+            "remapped LSP root to {} for container {} ({})",
             container_path,
-            self.container_id
+            self.container_id,
+            self.server_binary
         );
 
         Ok(original)
     }
 }
 
-impl LspInstaller for ContainerRustLspAdapter {
+impl LspInstaller for ContainerLspAdapter {
     type BinaryVersion = ();
 
     async fn check_if_user_installed(
@@ -401,7 +433,8 @@ impl LspInstaller for ContainerRustLspAdapter {
         _cx: &mut AsyncApp,
     ) -> Result<()> {
         Err(anyhow::anyhow!(
-            "container-managed rust-analyzer does not support version fetching"
+            "container-managed {} does not support version fetching",
+            self.server_binary
         ))
     }
 
@@ -811,6 +844,7 @@ impl SalaHud {
                                         .spawn(async move {
                                             TalaDaemonClient::check_lsp_capability(
                                                 &container_id_for_check,
+                                                "rust-analyzer",
                                             )
                                             .await
                                         });
@@ -873,48 +907,72 @@ impl SalaHud {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let adapter = Arc::new(ContainerRustLspAdapter::new(
-            container_id.to_string(),
-            project_name.to_string(),
-        ));
-        let language_name: LanguageName = "Rust".into();
+
+        let adapters: Vec<(LanguageName, Arc<dyn LspAdapter>)> = vec![
+            (
+                LanguageName::new("Rust"),
+                Arc::new(ContainerLspAdapter::rust(
+                    container_id.to_string(),
+                    project_name.to_string(),
+                )),
+            ),
+            (
+                LanguageName::new("Python"),
+                Arc::new(ContainerLspAdapter::python(
+                    container_id.to_string(),
+                    project_name.to_string(),
+                )),
+            ),
+        ];
 
         workspace.update(cx, |workspace, cx| {
             let project = workspace.project();
             let languages = project.read(cx).languages();
-            languages.register_lsp_adapter(language_name, adapter);
-            log::info!(
-                "registered container rust-analyzer LSP adapter for container {}",
-                container_id
-            );
 
-            let rust_buffers: Vec<_> = project
-                .read(cx)
-                .opened_buffers(cx)
-                .into_iter()
-                .filter(|buffer| {
-                    buffer
-                        .read(cx)
-                        .language()
-                        .map(|lang| lang.name().as_ref() == "Rust")
-                        .unwrap_or(false)
-                })
-                .collect();
-
-            if !rust_buffers.is_empty() {
+            for (language_name, adapter) in &adapters {
+                let server_name = adapter.name();
+                languages.register_lsp_adapter(language_name.clone(), adapter.clone());
                 log::info!(
-                    "restarting rust-analyzer for {} open Rust buffers",
-                    rust_buffers.len()
+                    "registered container {} LSP adapter for container {}",
+                    server_name.0,
+                    container_id
                 );
-                project.update(cx, |project, cx| {
-                    project.restart_language_servers_for_buffers(
-                        rust_buffers,
-                        collections::HashSet::from_iter([lsp::LanguageServerSelector::Name(
-                            ContainerRustLspAdapter::SERVER_NAME,
-                        )]),
-                        cx,
+            }
+
+            // Restart language servers for any open buffers in registered languages
+            for (language_name, adapter) in &adapters {
+                let lang_ref = language_name.as_ref();
+                let buffers: Vec<_> = project
+                    .read(cx)
+                    .opened_buffers(cx)
+                    .into_iter()
+                    .filter(|buffer| {
+                        buffer
+                            .read(cx)
+                            .language()
+                            .map(|lang| lang.name().as_ref() == lang_ref)
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                if !buffers.is_empty() {
+                    let server_name = adapter.name();
+                    log::info!(
+                        "restarting {} for {} open {} buffers",
+                        server_name.0,
+                        buffers.len(),
+                        lang_ref
                     );
-                });
+                    project.update(cx, |project, cx| {
+                        project.restart_language_servers_for_buffers(
+                            buffers,
+                            collections::HashSet::from_iter([
+                                lsp::LanguageServerSelector::Name(server_name),
+                            ]),
+                            cx,
+                        );
+                    });
+                }
             }
         });
         self.container_lsp_registered = true;
@@ -927,42 +985,57 @@ impl SalaHud {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let language_name: LanguageName = "Rust".into();
-        let server_name = ContainerRustLspAdapter::SERVER_NAME;
+
+        let entries: &[(&str, LanguageServerName)] = &[
+            ("Rust", LanguageServerName::new_static("rust-analyzer")),
+            ("Python", LanguageServerName::new_static("pyright")),
+        ];
 
         workspace.update(cx, |workspace, cx| {
             let project = workspace.project();
-            let languages = project.read(cx).languages();
-            languages.remove_lsp_adapter(&language_name, &server_name);
-            log::info!("removed container rust-analyzer LSP adapter");
 
-            let rust_buffers: Vec<_> = project
-                .read(cx)
-                .opened_buffers(cx)
-                .into_iter()
-                .filter(|buffer| {
-                    buffer
-                        .read(cx)
-                        .language()
-                        .map(|lang| lang.name().as_ref() == "Rust")
-                        .unwrap_or(false)
-                })
-                .collect();
+            // Remove adapters first (borrows languages immutably)
+            {
+                let languages = project.read(cx).languages();
+                for (lang_str, server_name) in entries {
+                    let language_name = LanguageName::new(lang_str);
+                    languages.remove_lsp_adapter(&language_name, server_name);
+                    log::info!("removed container {} LSP adapter", server_name.0);
+                }
+            }
 
-            if !rust_buffers.is_empty() {
-                log::info!(
-                    "restarting rust-analyzer for {} open Rust buffers (falling back to host)",
-                    rust_buffers.len()
-                );
-                project.update(cx, |project, cx| {
-                    project.restart_language_servers_for_buffers(
-                        rust_buffers,
-                        collections::HashSet::from_iter([lsp::LanguageServerSelector::Name(
-                            server_name,
-                        )]),
-                        cx,
+            // Restart affected buffers (borrows project mutably)
+            for (lang_str, server_name) in entries {
+                let buffers: Vec<_> = project
+                    .read(cx)
+                    .opened_buffers(cx)
+                    .into_iter()
+                    .filter(|buffer| {
+                        buffer
+                            .read(cx)
+                            .language()
+                            .map(|lang| lang.name().as_ref() == *lang_str)
+                            .unwrap_or(false)
+                    })
+                    .collect();
+
+                if !buffers.is_empty() {
+                    log::info!(
+                        "restarting {} for {} open {} buffers (falling back to host)",
+                        server_name.0,
+                        buffers.len(),
+                        lang_str
                     );
-                });
+                    project.update(cx, |project, cx| {
+                        project.restart_language_servers_for_buffers(
+                            buffers,
+                            collections::HashSet::from_iter([
+                                lsp::LanguageServerSelector::Name(server_name.clone()),
+                            ]),
+                            cx,
+                        );
+                    });
+                }
             }
         });
         self.container_lsp_registered = false;
