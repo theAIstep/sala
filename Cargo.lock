@@ -14540,6 +14540,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "sala_devtools"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures 0.3.31",
+ "hyper 0.14.32",
+ "prost",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-build",
+ "tower 0.4.13",
+]
+
+[[package]]
 name = "sala_hud"
 version = "0.1.0"
 dependencies = [

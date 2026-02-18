@@ -151,6 +151,7 @@ members = [
     "crates/rope",
     "crates/rpc",
     "crates/sala_hud",
+    "crates/sala_devtools",
     "crates/rules_library",
     "crates/schema_generator",
     "crates/search",

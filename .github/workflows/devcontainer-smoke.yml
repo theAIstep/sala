@@ -1,0 +1,93 @@
+name: DevContainer Smoke Test
+
+on:
+  push:
+    paths:
+      - "crates/sala_hud/**"
+      - "crates/sala_devtools/**"
+      - ".github/workflows/devcontainer-smoke.yml"
+  pull_request:
+    paths:
+      - "crates/sala_hud/**"
+      - "crates/sala_devtools/**"
+      - ".github/workflows/devcontainer-smoke.yml"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Point to the playground-rust project inside the monorepo checkout.
+  # In CI, the repo is checked out to $GITHUB_WORKSPACE, which is one
+  # level above the sala/ directory when using a monorepo layout.
+  # Adjust WORKSPACE_PATH in the smoke step below if your CI layout differs.
+  SMOKE_TIMEOUT: "300"
+
+jobs:
+  smoke:
+    name: DevContainer Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-action/setup@v1
+        with:
+          toolchain: stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-smoke-
+
+      - name: Ensure Docker is available
+        run: docker info
+
+      - name: Build tala daemon
+        working-directory: ${{ github.workspace }}/../tala
+        run: cargo build --bin tala --release
+        # NOTE: This step assumes the tala repo is available alongside sala.
+        # In a monorepo layout, adjust the working-directory accordingly.
+        # If tala is a separate repo, you may need to check it out first.
+        continue-on-error: true
+
+      - name: Start tala daemon (background)
+        run: |
+          # Start tala in background; smoke test will connect via /tmp/tala.sock
+          if [ -f "../tala/target/release/tala" ]; then
+            ../tala/target/release/tala &
+            TALA_PID=$!
+            echo "TALA_PID=$TALA_PID" >> $GITHUB_ENV
+            # Give tala a moment to start listening
+            sleep 2
+          else
+            echo "::warning::tala binary not found, smoke test will fail at daemon connect"
+          fi
+
+      - name: Build smoke test
+        run: cargo build -p sala_devtools --bin devcontainer_smoke_test
+
+      - name: Run smoke test
+        run: |
+          cargo run -p sala_devtools --bin devcontainer_smoke_test -- \
+            --max-wait-seconds ${{ env.SMOKE_TIMEOUT }} \
+            ${{ github.workspace }}/../playground-rust
+
+      - name: Stop tala daemon
+        if: always()
+        run: |
+          if [ -n "$TALA_PID" ]; then
+            kill "$TALA_PID" 2>/dev/null || true
+          fi
