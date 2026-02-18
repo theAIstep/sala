@@ -12,31 +12,59 @@ workspace = true
 path = "src/sala_hud.rs"
 doctest = false
 
+[features]
+default = ["gui"]
+gui = [
+    "dep:anyhow",
+    "dep:async-trait",
+    "dep:collections",
+    "dep:futures",
+    "dep:gpui",
+    "dep:hyper",
+    "dep:language",
+    "dep:lsp",
+    "dep:project",
+    "dep:prost",
+    "dep:settings",
+    "dep:task",
+    "dep:terminal",
+    "dep:terminal_view",
+    "dep:theme",
+    "dep:tokio",
+    "dep:tonic",
+    "dep:tower",
+    "dep:ui",
+    "dep:util",
+    "dep:workspace",
+]
+
 [dependencies]
-anyhow.workspace = true
-async-trait.workspace = true
-collections.workspace = true
-futures.workspace = true
-gpui.workspace = true
-hyper.workspace = true
-language.workspace = true
 log.workspace = true
-lsp.workspace = true
-project.workspace = true
-prost.workspace = true
-serde.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-settings.workspace = true
-task.workspace = true
-terminal.workspace = true
-terminal_view.workspace = true
-theme.workspace = true
-tokio = { workspace = true, features = ["full"] }
-tonic.workspace = true
-tower.workspace = true
-ui.workspace = true
-util.workspace = true
-workspace.workspace = true
+
+# GUI-only dependencies
+anyhow = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+collections = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
+gpui = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+language = { workspace = true, optional = true }
+lsp = { workspace = true, optional = true }
+project = { workspace = true, optional = true }
+prost = { workspace = true, optional = true }
+settings = { workspace = true, optional = true }
+task = { workspace = true, optional = true }
+terminal = { workspace = true, optional = true }
+terminal_view = { workspace = true, optional = true }
+theme = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["full"], optional = true }
+tonic = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+ui = { workspace = true, optional = true }
+util = { workspace = true, optional = true }
+workspace = { workspace = true, optional = true }
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

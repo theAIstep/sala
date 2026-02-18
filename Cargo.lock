@@ -14547,6 +14547,7 @@ dependencies = [
  "futures 0.3.31",
  "hyper 0.14.32",
  "prost",
+ "sala_hud",
  "serde_json",
  "tokio",
  "tonic",

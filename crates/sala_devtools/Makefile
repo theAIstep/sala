@@ -6,13 +6,16 @@
 #   make smoke WORKSPACE=/my/proj       # custom workspace
 #   make smoke TIMEOUT=120              # override build timeout
 #   make smoke LANGUAGE=python          # override language
+#   make status                          # show all running DevContainers
+#   make status-json                     # JSON output
+#   make status WORKSPACE=/my/proj       # filter to workspace
 
 WORKSPACE  ?= /workspace/_JAGORA/playground-rust
 TIMEOUT    ?= 600
 LANGUAGE   ?= rust
 TALA_SOCK  ?= /tmp/tala.sock
 
-.PHONY: smoke smoke-python smoke-build check-tala
+.PHONY: smoke smoke-python smoke-build check-tala status status-build status-json
 
 smoke-build:
 	@echo "--- Building smoke test binary ---"
@@ -51,3 +54,13 @@ smoke-python: smoke-build check-tala
 		--language python \
 		--max-wait-seconds $(TIMEOUT) \
 		/workspace/_JAGORA/playground-python
+
+status-build:
+	@echo "--- Building status binary ---"
+	cargo build -p sala_devtools --bin devcontainer_status
+
+status: status-build
+	cargo run -p sala_devtools --bin devcontainer_status -- $(STATUS_ARGS)
+
+status-json: status-build
+	cargo run -p sala_devtools --bin devcontainer_status -- --json $(STATUS_ARGS)

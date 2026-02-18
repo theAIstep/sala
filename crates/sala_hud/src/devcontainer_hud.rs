@@ -1,23 +1,29 @@
+use serde::Serialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
 /// Phase of a DevContainer lifecycle.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "phase")]
 pub enum DevContainerPhase {
     Idle,
     Preflight {
+        #[serde(skip)]
         started_at: Instant,
     },
     Building {
+        #[serde(skip)]
         started_at: Instant,
         progress: u8,
         message: String,
     },
     Running {
+        #[serde(skip)]
         started_at: Instant,
     },
     Error {
+        #[serde(skip)]
         at: Instant,
         message: String,
     },
@@ -56,7 +62,7 @@ impl DevContainerPhase {
 }
 
 /// Capabilities detected inside a running DevContainer.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct DevContainerCapabilities {
     pub terminal_ok: bool,
     pub lsp_rust_ok: bool,
@@ -64,7 +70,7 @@ pub struct DevContainerCapabilities {
 }
 
 /// Full status of a DevContainer for a given workspace.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct DevContainerStatus {
     pub workspace_root: PathBuf,
     pub project_name: String,
@@ -297,6 +303,12 @@ impl DevContainerHud {
         }
 
         lines.join("\n")
+    }
+
+    /// Serialize all workspace statuses as a pretty-printed JSON string.
+    pub fn format_status_json(&self) -> Result<String, serde_json::Error> {
+        let statuses: Vec<&DevContainerStatus> = self.workspaces.values().collect();
+        serde_json::to_string_pretty(&statuses)
     }
 
     fn get_or_create(&mut self, workspace: &PathBuf) -> &mut DevContainerStatus {
@@ -604,5 +616,39 @@ mod tests {
         let status = hud.status(&ws).expect("workspace should be tracked");
         assert_eq!(status.container_id.as_deref(), Some("second-container"));
         assert_eq!(status.capabilities, DevContainerCapabilities::default());
+    }
+
+    #[test]
+    fn test_format_status_json() {
+        let mut hud = DevContainerHud::new();
+        let ws = test_workspace();
+
+        hud.on_preflight_started(ws.clone(), "test-project".to_string());
+        hud.on_container_started(&ws, "abc123def456".to_string());
+        hud.on_terminal_smoke_result(&ws, true);
+        hud.on_lsp_rust_result(&ws, true);
+        hud.on_lsp_python_result(&ws, false);
+
+        let json_str = hud.format_status_json().expect("json serialization should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json_str).expect("should be valid JSON");
+
+        let arr = parsed.as_array().expect("root should be an array");
+        assert_eq!(arr.len(), 1);
+
+        let entry = &arr[0];
+        assert_eq!(entry["project_name"], "test-project");
+        assert_eq!(entry["container_id"], "abc123def456");
+        assert_eq!(entry["phase"]["phase"], "Running");
+        assert_eq!(entry["capabilities"]["terminal_ok"], true);
+        assert_eq!(entry["capabilities"]["lsp_rust_ok"], true);
+        assert_eq!(entry["capabilities"]["lsp_python_ok"], false);
+    }
+
+    #[test]
+    fn test_format_status_json_empty() {
+        let hud = DevContainerHud::new();
+        let json_str = hud.format_status_json().expect("json serialization should succeed");
+        assert_eq!(json_str, "[]");
     }
 }
