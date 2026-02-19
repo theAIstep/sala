@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package devcontainer;
 
-// tala DevContainer service for managing development containers
+// tais-devcontainerd — TAIS DevContainer service for managing development containers
 service DevContainerService {
     // Health check for daemon liveness
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);

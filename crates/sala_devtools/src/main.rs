@@ -2,7 +2,7 @@
 //
 // Exercises Flow 1 (BuildContainer), Phase 2B (Terminal), and Phase 2C
 // (Local Exec LSP) without requiring a GPUI window. Designed to run inside
-// a DevContainer terminal or any environment where `tala` is listening on
+// a DevContainer terminal or any environment where `tais-devcontainerd` is listening on
 // its IPC socket.
 //
 // # Usage
@@ -683,11 +683,11 @@ async fn main() {
     // -- Connect ----------------------------------------------------------
     if !json_mode {
         println!(
-            "[DAEMON]    Connecting to tala daemon at {} ...",
-            ipc::TALA_SOCKET
+            "[DAEMON]    Connecting to TAIS DevContainer daemon at {} ...",
+            ipc::DAEMON_SOCKET
         );
     }
-    let mut client = match ipc::connect_tala().await {
+    let mut client = match ipc::connect_daemon().await {
         Ok(c) => c,
         Err(err) => {
             if !json_mode {

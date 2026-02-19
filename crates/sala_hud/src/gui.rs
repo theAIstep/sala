@@ -51,7 +51,7 @@ pub struct SalaHud {
     width: Option<Pixels>,
     workspace: WeakEntity<Workspace>,
     focus_handle: FocusHandle,
-    daemon_client: Option<TalaDaemonClient>,
+    daemon_client: Option<DevContainerDaemonClient>,
     connection_status: ConnectionStatus,
     devcontainer_state: DevContainerState,
     workspace_path: Option<PathBuf>,
@@ -64,7 +64,7 @@ pub struct SalaHud {
 }
 
 #[derive(Clone)]
-struct TalaDaemonClient {
+struct DevContainerDaemonClient {
     client: devcontainer::dev_container_service_client::DevContainerServiceClient<
         tonic::transport::Channel,
     >,
@@ -199,14 +199,14 @@ mod ipc {
     }
 }
 
-impl TalaDaemonClient {
+impl DevContainerDaemonClient {
     async fn connect() -> Result<Self> {
         #[cfg(unix)]
-        let ipc_path = "/tmp/tala.sock".to_string();
+        let ipc_path = "/tmp/tais-devcontainerd.sock".to_string();
         #[cfg(windows)]
-        let ipc_path = "\\\\.\\pipe\\tala".to_string();
+        let ipc_path = "\\\\.\\pipe\\tais-devcontainerd".to_string();
 
-        log::info!("Attempting to connect to tala daemon at {}", ipc_path);
+        log::info!("Attempting to connect to tais-devcontainerd daemon at {}", ipc_path);
 
         // tonic/hyper use tokio internally for the transport layer.
         // When running under a non-tokio executor (e.g. GPUI tests on
@@ -671,7 +671,7 @@ impl SalaHud {
         });
 
         let connection_task =
-            cx.background_spawn(async move { TalaDaemonClient::connect().await });
+            cx.background_spawn(async move { DevContainerDaemonClient::connect().await });
 
         let weak_entity = entity.downgrade();
         cx.spawn_in(window, {
@@ -753,7 +753,7 @@ impl SalaHud {
                                 .log_err();
                         }
                         Err(error) => {
-                            log::error!("Failed health check with tala daemon: {}", error);
+                            log::error!("Failed health check with tais-devcontainerd daemon: {}", error);
                             let error_msg =
                                 format!("Health check failed: {}", error);
                             weak_entity
@@ -774,7 +774,7 @@ impl SalaHud {
                     }
                     },
                     Err(error) => {
-                        log::error!("Failed to connect to tala daemon: {}", error);
+                        log::error!("Failed to connect to tais-devcontainerd daemon: {}", error);
                         let error_msg = format!("Connection failed: {}", error);
                         weak_entity
                             .update(cx, |this, cx| {
@@ -957,7 +957,7 @@ impl SalaHud {
                                         let lsp_check = cx
                                             .background_executor()
                                             .spawn(async move {
-                                                TalaDaemonClient::check_lsp_capability(
+                                                DevContainerDaemonClient::check_lsp_capability(
                                                     &container_id_for_check,
                                                     "rust-analyzer",
                                                 )
@@ -988,7 +988,7 @@ impl SalaHud {
                                         let python_check = cx
                                             .background_executor()
                                             .spawn(async move {
-                                                TalaDaemonClient::check_lsp_capability(
+                                                DevContainerDaemonClient::check_lsp_capability(
                                                     &container_id_for_check,
                                                     "pyright-langserver",
                                                 )
@@ -1552,14 +1552,14 @@ impl Render for SalaHud {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let (connection_text, connection_color) = match &self.connection_status {
             ConnectionStatus::Connecting => {
-                ("Connecting to tala daemon...".to_string(), Color::Muted)
+                ("Connecting to tais-devcontainerd daemon...".to_string(), Color::Muted)
             }
             ConnectionStatus::Connected(version) => (
-                format!("Connected to tala daemon v{}", version),
+                format!("Connected to tais-devcontainerd daemon v{}", version),
                 Color::Success,
             ),
             ConnectionStatus::Disconnected(error) => (
-                format!("Not connected to tala daemon: {}", error),
+                format!("Not connected to tais-devcontainerd daemon: {}", error),
                 Color::Warning,
             ),
         };

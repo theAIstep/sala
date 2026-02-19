@@ -18,21 +18,21 @@
 DC_WORKSPACE ?= /workspace/_JAGORA/playground-rust
 TIMEOUT      ?= 600
 LANGUAGE     ?= rust
-TALA_SOCK    ?= /tmp/tala.sock
+DAEMON_SOCK  ?= /tmp/tais-devcontainerd.sock
 
 .PHONY: dc-smoke dc-smoke-python dc-status dc-status-json \
         dc-doctor dc-doctor-json dc-build dc-connect \
-        check-tala build-all
+        check-daemon build-all
 
 # --- Prerequisites ---
 
-check-tala:
-	@if [ ! -S "$(TALA_SOCK)" ]; then \
+check-daemon:
+	@if [ ! -S "$(DAEMON_SOCK)" ]; then \
 		echo ""; \
-		echo "ERROR: tala daemon is not running (no socket at $(TALA_SOCK))."; \
+		echo "ERROR: tais-devcontainerd is not running (no socket at $(DAEMON_SOCK))."; \
 		echo ""; \
 		echo "Start it first:"; \
-		echo "  cd /workspace/_JAGORA/tala && cargo run -p tala-server --bin tala"; \
+		echo "  cd /workspace/_TAIS_APPS_FOUNDATION/tais-devcontainerd && cargo run -p tais-devcontainerd-server --bin tais-devcontainerd"; \
 		echo ""; \
 		exit 1; \
 	fi
@@ -43,7 +43,7 @@ build-all:
 
 # --- dc-smoke ---
 
-dc-smoke: check-tala
+dc-smoke: check-daemon
 	@echo ""
 	@echo "--- dc-smoke ($(LANGUAGE)) ---"
 	@echo "    workspace: $(DC_WORKSPACE)"
@@ -55,7 +55,7 @@ dc-smoke: check-tala
 		--language $(LANGUAGE) \
 		--max-wait-seconds $(TIMEOUT)
 
-dc-smoke-python: check-tala
+dc-smoke-python: check-daemon
 	@echo ""
 	@echo "--- dc-smoke (python) ---"
 	@echo "    workspace: /workspace/_JAGORA/playground-python"
@@ -88,12 +88,12 @@ dc-doctor-json:
 
 # --- dc-build ---
 
-dc-build: check-tala
+dc-build: check-daemon
 	cargo run -p sala_devtools --bin dc-build -- \
 		--workspace $(DC_WORKSPACE)
 
 # --- dc-connect ---
 
-dc-connect: check-tala
+dc-connect: check-daemon
 	cargo run -p sala_devtools --bin dc-connect -- \
 		--workspace $(DC_WORKSPACE)

@@ -1,6 +1,6 @@
 // dc-doctor — Diagnoses why a workspace's DevContainer is not "green".
 //
-// Runs a sequence of checks against the Tala daemon, Docker, and the
+// Runs a sequence of checks against the TAIS DevContainer daemon, Docker, and the
 // filesystem, then prints a human-readable report (or JSON) with
 // per-check status and concrete next-action hints.
 //
@@ -103,16 +103,16 @@ pub enum Verdict {
 // Interpretation functions (pure, testable without I/O)
 // ---------------------------------------------------------------------------
 
-pub fn interpret_tala_health(
+pub fn interpret_daemon_health(
     result: Result<(String, bool), String>,
     socket_path: &str,
 ) -> CheckResult {
     match result {
         Ok((version, true)) => CheckResult {
-            name: "Tala daemon".to_string(),
+            name: "TAIS DevContainer daemon".to_string(),
             status: CheckStatus::Ok,
             message: format!(
-                "Tala daemon reachable at {} (version {})",
+                "TAIS DevContainer daemon reachable at {} (version {})",
                 socket_path, version
             ),
             suggestion: None,
@@ -123,14 +123,14 @@ pub fn interpret_tala_health(
             })),
         },
         Ok((version, false)) => CheckResult {
-            name: "Tala daemon".to_string(),
+            name: "TAIS DevContainer daemon".to_string(),
             status: CheckStatus::Error,
             message: format!(
-                "Tala daemon at {} reports unhealthy (version {})",
+                "TAIS DevContainer daemon at {} reports unhealthy (version {})",
                 socket_path, version
             ),
             suggestion: Some(
-                "Restart the tala daemon: cd /workspace/_JAGORA/tala && cargo run -p tala-server --bin tala"
+                "Restart the daemon: cd /workspace/_TAIS_APPS_FOUNDATION/tais-devcontainerd && cargo run -p tais-devcontainerd-server --bin tais-devcontainerd"
                     .to_string(),
             ),
             details: Some(serde_json::json!({
@@ -140,11 +140,11 @@ pub fn interpret_tala_health(
             })),
         },
         Err(error) => CheckResult {
-            name: "Tala daemon".to_string(),
+            name: "TAIS DevContainer daemon".to_string(),
             status: CheckStatus::Error,
-            message: format!("Tala daemon not reachable at {}", socket_path),
+            message: format!("TAIS DevContainer daemon not reachable at {}", socket_path),
             suggestion: Some(format!(
-                "Start tala in a separate terminal:\n  cd /workspace/_JAGORA/tala && cargo run -p tala-server --bin tala\n\nError: {}",
+                "Start tais-devcontainerd in a separate terminal:\n  cd /workspace/_TAIS_APPS_FOUNDATION/tais-devcontainerd && cargo run -p tais-devcontainerd-server --bin tais-devcontainerd\n\nError: {}",
                 error
             )),
             details: Some(serde_json::json!({
@@ -203,7 +203,7 @@ pub fn interpret_docker_preflight(
                     details: Some(serde_json::json!({
                         "docker_available": true,
                         "permissions_ok": true,
-                        "source": "tala_preflight",
+                        "source": "daemon_preflight",
                     })),
                 }
             } else if data.docker_available && !data.docker_permissions_ok {
@@ -244,7 +244,7 @@ pub fn interpret_docker_preflight(
         Some(Err(error)) => CheckResult {
             name: "Docker daemon".to_string(),
             status: CheckStatus::Error,
-            message: "Failed to check Docker via Tala preflight".to_string(),
+            message: "Failed to check Docker via daemon preflight".to_string(),
             suggestion: Some(format!("Error: {error}")),
             details: None,
         },
@@ -253,7 +253,7 @@ pub fn interpret_docker_preflight(
                 Some(true) => CheckResult {
                     name: "Docker daemon".to_string(),
                     status: CheckStatus::Ok,
-                    message: "Docker daemon reachable (direct check, Tala unavailable)".to_string(),
+                    message: "Docker daemon reachable (direct check, daemon unavailable)".to_string(),
                     suggestion: None,
                     details: Some(serde_json::json!({ "source": "direct" })),
                 },
@@ -269,7 +269,7 @@ pub fn interpret_docker_preflight(
                 None => CheckResult {
                     name: "Docker daemon".to_string(),
                     status: CheckStatus::Skip,
-                    message: "Docker check skipped (Tala unavailable, direct check failed)"
+                    message: "Docker check skipped (daemon unavailable, direct check failed)"
                         .to_string(),
                     suggestion: None,
                     details: None,
@@ -348,7 +348,7 @@ pub fn interpret_workspace_status(
             CheckResult {
                 name: "Container status".to_string(),
                 status: CheckStatus::Warn,
-                message: "Could not query workspace status from Tala".to_string(),
+                message: "Could not query workspace status from daemon".to_string(),
                 suggestion: Some(format!("Error: {error}")),
                 details: None,
             },
@@ -358,7 +358,7 @@ pub fn interpret_workspace_status(
             CheckResult {
                 name: "Container status".to_string(),
                 status: CheckStatus::Skip,
-                message: "Container status check skipped (Tala unavailable)".to_string(),
+                message: "Container status check skipped (daemon unavailable)".to_string(),
                 suggestion: None,
                 details: None,
             },
@@ -489,11 +489,11 @@ pub struct StatusData {
 
 const GRPC_TIMEOUT: Duration = Duration::from_secs(5);
 
-async fn connect_tala() -> anyhow::Result<DevContainerServiceClient<tonic::transport::Channel>> {
-    ipc::connect_tala_with_timeout(ipc::TALA_CONNECT_TIMEOUT).await
+async fn connect_daemon() -> anyhow::Result<DevContainerServiceClient<tonic::transport::Channel>> {
+    ipc::connect_daemon_with_timeout(ipc::DAEMON_CONNECT_TIMEOUT).await
 }
 
-async fn tala_health(
+async fn daemon_health(
     client: &mut DevContainerServiceClient<tonic::transport::Channel>,
 ) -> anyhow::Result<(String, bool)> {
     let resp = tokio::time::timeout(
@@ -506,7 +506,7 @@ async fn tala_health(
     Ok((inner.version, inner.healthy))
 }
 
-async fn tala_preflight(
+async fn daemon_preflight(
     client: &mut DevContainerServiceClient<tonic::transport::Channel>,
     workspace: &str,
 ) -> anyhow::Result<PrefightData> {
@@ -526,7 +526,7 @@ async fn tala_preflight(
     })
 }
 
-async fn tala_get_status(
+async fn daemon_get_status(
     client: &mut DevContainerServiceClient<tonic::transport::Channel>,
     workspace: &str,
 ) -> anyhow::Result<StatusData> {
@@ -724,28 +724,28 @@ async fn main() -> anyhow::Result<()> {
 
     let mut checks: Vec<CheckResult> = Vec::new();
 
-    // --- Check 1: Tala daemon connectivity ---
-    let tala_client = connect_tala().await;
-    let health_result = match tala_client {
-        Ok(mut client) => match tala_health(&mut client).await {
+    // --- Check 1: TAIS DevContainer daemon connectivity ---
+    let daemon_client = connect_daemon().await;
+    let health_result = match daemon_client {
+        Ok(mut client) => match daemon_health(&mut client).await {
             Ok(pair) => Ok(pair),
             Err(err) => Err(err.to_string()),
         },
         Err(err) => Err(err.to_string()),
     };
-    checks.push(interpret_tala_health(health_result, ipc::TALA_SOCKET));
+    checks.push(interpret_daemon_health(health_result, ipc::DAEMON_SOCKET));
 
     // Reconnect for further RPCs
-    let mut tala_client = connect_tala().await.ok();
+    let mut daemon_client = connect_daemon().await.ok();
 
     // --- Check 2: DevContainer config ---
     let config_path = ipc::detect_devcontainer_config(&workspace);
     checks.push(interpret_devcontainer_config(&workspace, config_path));
 
-    // --- Check 3: Docker (via Tala preflight, fallback to direct) ---
-    let preflight_result = if let Some(ref mut client) = tala_client {
+    // --- Check 3: Docker (via daemon preflight, fallback to direct) ---
+    let preflight_result = if let Some(ref mut client) = daemon_client {
         Some(
-            tala_preflight(client, &workspace_str)
+            daemon_preflight(client, &workspace_str)
                 .await
                 .map_err(|e| e.to_string()),
         )
@@ -760,9 +760,9 @@ async fn main() -> anyhow::Result<()> {
     checks.push(interpret_docker_preflight(preflight_result, direct_docker));
 
     // --- Check 4: Workspace / container status ---
-    let status_result = if let Some(ref mut client) = tala_client {
+    let status_result = if let Some(ref mut client) = daemon_client {
         Some(
-            tala_get_status(client, &workspace_str)
+            daemon_get_status(client, &workspace_str)
                 .await
                 .map_err(|e| e.to_string()),
         )
@@ -809,25 +809,25 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_tala_healthy() {
-        let result = interpret_tala_health(Ok(("0.1.0".to_string(), true)), "/tmp/tala.sock");
+    fn test_daemon_healthy() {
+        let result = interpret_daemon_health(Ok(("0.1.0".to_string(), true)), "/tmp/tais-devcontainerd.sock");
         assert_eq!(result.status, CheckStatus::Ok);
         assert!(result.message.contains("0.1.0"));
         assert!(result.suggestion.is_none());
     }
 
     #[test]
-    fn test_tala_unhealthy() {
-        let result = interpret_tala_health(Ok(("0.1.0".to_string(), false)), "/tmp/tala.sock");
+    fn test_daemon_unhealthy() {
+        let result = interpret_daemon_health(Ok(("0.1.0".to_string(), false)), "/tmp/tais-devcontainerd.sock");
         assert_eq!(result.status, CheckStatus::Error);
         assert!(result.suggestion.is_some());
     }
 
     #[test]
-    fn test_tala_unreachable() {
-        let result = interpret_tala_health(
+    fn test_daemon_unreachable() {
+        let result = interpret_daemon_health(
             Err("connection refused".to_string()),
-            "/tmp/tala.sock",
+            "/tmp/tais-devcontainerd.sock",
         );
         assert_eq!(result.status, CheckStatus::Error);
         assert!(result.message.contains("not reachable"));
@@ -855,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn test_docker_ok_via_tala() {
+    fn test_docker_ok_via_daemon() {
         let data = PrefightData {
             docker_available: true,
             docker_permissions_ok: true,
@@ -1038,9 +1038,9 @@ mod tests {
     fn test_text_report_format() {
         let checks = vec![
             CheckResult {
-                name: "Tala daemon".to_string(),
+                name: "TAIS DevContainer daemon".to_string(),
                 status: CheckStatus::Ok,
-                message: "Tala daemon reachable at /tmp/tala.sock (version 0.1.0)".to_string(),
+                message: "TAIS DevContainer daemon reachable at /tmp/tais-devcontainerd.sock (version 0.1.0)".to_string(),
                 suggestion: None,
                 details: None,
             },
@@ -1069,7 +1069,7 @@ mod tests {
     fn test_json_report_format() {
         let checks = vec![
             CheckResult {
-                name: "Tala daemon".to_string(),
+                name: "TAIS DevContainer daemon".to_string(),
                 status: CheckStatus::Ok,
                 message: "ok".to_string(),
                 suggestion: None,

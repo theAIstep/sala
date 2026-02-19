@@ -4,7 +4,7 @@
 // (terminal, rust-analyzer, pyright), and prints the results using the
 // shared HUD model from `sala_hud::devcontainer_hud`.
 //
-// This tool queries Docker directly (not via Tala), providing a raw
+// This tool queries Docker directly (not via tais-devcontainerd), providing a raw
 // "what Docker sees" perspective.
 //
 // # Usage

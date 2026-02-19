@@ -1,6 +1,6 @@
 # Sala DevContainer CLI API (`dc-*`)
 
-Canonical, IDE-agnostic CLI surface for Tala DevContainer orchestration.
+Canonical, IDE-agnostic CLI surface for TAIS DevContainer daemon orchestration.
 All commands work from VS Code, Zed, plain terminal, Jagora, scripts, and CI.
 
 ## Common Flags
@@ -59,7 +59,7 @@ Step `status` values: `"ok"`, `"fail"`, `"skip"`.
 
 ### `dc-status`
 
-Show running DevContainers discovered via Docker (direct Docker view, not through Tala).
+Show running DevContainers discovered via Docker (direct Docker view, not through tais-devcontainerd).
 
 **JSON schema:** Array of `DcStatusJson` objects (via `sala_hud::format_status_json`):
 ```json
@@ -82,8 +82,8 @@ Show running DevContainers discovered via Docker (direct Docker view, not throug
 
 ### `dc-doctor`
 
-Comprehensive diagnostic: Tala daemon, Docker, config, container status, capabilities.
-Interpreted view through Tala + HUD + Docker.
+Comprehensive diagnostic: TAIS DevContainer daemon, Docker, config, container status, capabilities.
+Interpreted view through tais-devcontainerd + HUD + Docker.
 
 **Exit codes:**
 
@@ -99,11 +99,11 @@ Interpreted view through Tala + HUD + Docker.
   "overall_status": "HEALTHY",
   "checks": [
     {
-      "name": "Tala daemon",
+      "name": "TAIS DevContainer daemon",
       "status": "OK",
-      "message": "Tala daemon reachable at /tmp/tala.sock (version 0.1.0)",
+      "message": "TAIS DevContainer daemon reachable at /tmp/tais-devcontainerd.sock (version 0.1.0)",
       "suggestion": null,
-      "details": { "socket": "/tmp/tala.sock", "version": "0.1.0", "healthy": true }
+      "details": { "socket": "/tmp/tais-devcontainerd.sock", "version": "0.1.0", "healthy": true }
     }
   ]
 }
@@ -116,7 +116,7 @@ Check `status` values: `"OK"`, `"WARN"`, `"ERROR"`, `"SKIP"`.
 
 ### `dc-build`
 
-Build or rebuild a DevContainer via Tala's `BuildContainer` RPC.
+Build or rebuild a DevContainer via the TAIS DevContainer daemon's `BuildContainer` RPC.
 
 **Extra flags:**
 | Flag | Short | Default | Description |
@@ -160,7 +160,7 @@ On failure:
 
 ### `dc-connect`
 
-Fast-path connection to an existing DevContainer via Tala's `ConnectContainer` RPC.
+Fast-path connection to an existing DevContainer via the TAIS DevContainer daemon's `ConnectContainer` RPC.
 
 **Exit codes:**
 
@@ -210,13 +210,13 @@ DC_WORKSPACE=/some/path make dc-doctor
 | `DC_WORKSPACE` | `/workspace/_JAGORA/playground-rust` | Workspace path |
 | `TIMEOUT` | `600` | Build timeout (seconds) |
 | `LANGUAGE` | `rust` | LSP language for smoke test |
-| `TALA_SOCK` | `/tmp/tala.sock` | Tala daemon socket path |
+| `DAEMON_SOCK` | `/tmp/tais-devcontainerd.sock` | TAIS DevContainer daemon socket path |
 
 ---
 
 ## Architecture Notes
 
 - **dc-status** queries Docker directly (`docker ps` + `docker inspect`) — "what Docker sees"
-- **dc-doctor** queries through Tala (gRPC) + Docker — "interpreted Tala + HUD + Docker view"
-- **dc-build**, **dc-connect**, **dc-smoke** all go through Tala's gRPC API
+- **dc-doctor** queries through tais-devcontainerd (gRPC) + Docker — "interpreted tais-devcontainerd + HUD + Docker view"
+- **dc-build**, **dc-connect**, **dc-smoke** all go through tais-devcontainerd's gRPC API
 - All commands are thin wrappers — no business logic re-implementation

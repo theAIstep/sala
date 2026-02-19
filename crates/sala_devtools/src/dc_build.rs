@@ -1,6 +1,6 @@
-// dc-build — Build or rebuild a DevContainer via Tala.
+// dc-build — Build or rebuild a DevContainer via tais-devcontainerd.
 //
-// Thin wrapper around Tala's `BuildContainer` gRPC call with streaming
+// Thin wrapper around the TAIS DevContainer daemon's `BuildContainer` gRPC call with streaming
 // progress output. Text mode shows live progress lines; JSON mode emits
 // a single summary object at the end.
 //
@@ -42,7 +42,7 @@ fn parse_args() -> anyhow::Result<BuildArgs> {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dc-build [OPTIONS]");
         println!();
-        println!("Build or rebuild a DevContainer for the given workspace via Tala.");
+        println!("Build or rebuild a DevContainer for the given workspace via the TAIS DevContainer daemon.");
         println!();
         println!("Options:");
         println!("  -w, --workspace <PATH>     Workspace to build (default: cwd)");
@@ -117,14 +117,14 @@ async fn main() {
     };
     let config_str = config_path.to_string_lossy().to_string();
 
-    // Connect to Tala
+    // Connect to daemon
     if !json_mode {
-        println!("dc-build — connecting to tala ...");
+        println!("dc-build — connecting to tais-devcontainerd daemon ...");
     }
-    let mut client = match ipc::connect_tala().await {
+    let mut client = match ipc::connect_daemon().await {
         Ok(c) => c,
         Err(err) => {
-            let msg = format!("Failed to connect to tala daemon: {err}");
+            let msg = format!("Failed to connect to TAIS DevContainer daemon: {err}");
             if json_mode {
                 print_json(&DcBuildJson {
                     workspace: workspace_str,

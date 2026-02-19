@@ -9,11 +9,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[cfg(unix)]
-pub const TALA_SOCKET: &str = "/tmp/tala.sock";
+pub const DAEMON_SOCKET: &str = "/tmp/tais-devcontainerd.sock";
 #[cfg(windows)]
-pub const TALA_SOCKET: &str = "\\\\.\\pipe\\tala";
+pub const DAEMON_SOCKET: &str = "\\\\.\\pipe\\tais-devcontainerd";
 
-pub const TALA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // IPC transport
@@ -152,20 +152,20 @@ pub use transport::create_channel;
 // Convenience helpers
 // ---------------------------------------------------------------------------
 
-/// Connect to the Tala daemon at the default socket path.
-pub async fn connect_tala(
+/// Connect to the TAIS DevContainer daemon at the default socket path.
+pub async fn connect_daemon(
 ) -> anyhow::Result<DevContainerServiceClient<tonic::transport::Channel>> {
-    let channel = create_channel(TALA_SOCKET.to_string())
+    let channel = create_channel(DAEMON_SOCKET.to_string())
         .await
-        .context("failed to connect to tala daemon -- is it running?")?;
+        .context("failed to connect to TAIS DevContainer daemon -- is it running?")?;
     Ok(DevContainerServiceClient::new(channel))
 }
 
-/// Connect to the Tala daemon with a timeout.
-pub async fn connect_tala_with_timeout(
+/// Connect to the TAIS DevContainer daemon with a timeout.
+pub async fn connect_daemon_with_timeout(
     timeout: Duration,
 ) -> anyhow::Result<DevContainerServiceClient<tonic::transport::Channel>> {
-    let channel = tokio::time::timeout(timeout, create_channel(TALA_SOCKET.to_string()))
+    let channel = tokio::time::timeout(timeout, create_channel(DAEMON_SOCKET.to_string()))
         .await
         .map_err(|_| anyhow::anyhow!("connection timed out after {:?}", timeout))??;
     Ok(DevContainerServiceClient::new(channel))

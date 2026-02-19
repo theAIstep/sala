@@ -1,6 +1,6 @@
-// dc-connect — Fast-path connection to an existing DevContainer via Tala.
+// dc-connect — Fast-path connection to an existing DevContainer via tais-devcontainerd.
 //
-// Thin wrapper around Tala's `ConnectContainer` gRPC call. Asks Tala to
+// Thin wrapper around the TAIS DevContainer daemon's `ConnectContainer` gRPC call. Asks the daemon to
 // check if a container exists/runs for the workspace and "connect" to it
 // (ensure running, update internal state).
 //
@@ -31,8 +31,8 @@ fn parse_args() -> cli::CommonArgs {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("Usage: dc-connect [OPTIONS]");
         println!();
-        println!("Connect to an existing DevContainer for the given workspace via Tala.");
-        println!("If the container is stopped, Tala will restart it.");
+        println!("Connect to an existing DevContainer for the given workspace via the TAIS DevContainer daemon.");
+        println!("If the container is stopped, the daemon will restart it.");
         println!("If config has changed, a rebuild hint is shown.");
         println!();
         println!("Options:");
@@ -70,14 +70,14 @@ async fn main() {
         }
     }
 
-    // Connect to Tala
-    let mut client = match ipc::connect_tala().await {
+    // Connect to daemon
+    let mut client = match ipc::connect_daemon().await {
         Ok(c) => c,
         Err(err) => {
             if json_mode {
-                print_error_json(&workspace_str, &format!("Failed to connect to tala: {err}"));
+                print_error_json(&workspace_str, &format!("Failed to connect to TAIS DevContainer daemon: {err}"));
             } else {
-                eprintln!("error: failed to connect to tala daemon: {err}");
+                eprintln!("error: failed to connect to TAIS DevContainer daemon: {err}");
             }
             std::process::exit(1);
         }

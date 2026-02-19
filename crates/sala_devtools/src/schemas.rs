@@ -133,7 +133,7 @@ mod tests {
             overall_status: "HEALTHY".to_string(),
             checks: vec![
                 DcDoctorCheckJson {
-                    name: "Tala daemon".to_string(),
+                    name: "TAIS DevContainer daemon".to_string(),
                     status: "OK".to_string(),
                     message: "reachable".to_string(),
                     suggestion: None,
